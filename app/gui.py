@@ -25,6 +25,7 @@ class AppGUI(tk.Tk):
 
         self.pdf_path_var = tk.StringVar()
         self.output_dir_var = tk.StringVar(value=str(self.extract_output_dir))
+        self.crop_padding_var = tk.StringVar(value="10")
         self.status_vars = {}
         self.page_status_vars = {}
         self.bbox_status_vars = {}
@@ -66,6 +67,9 @@ class AppGUI(tk.Tk):
         out_row.pack(fill="x", pady=(2, 10))
         ttk.Entry(out_row, textvariable=self.output_dir_var).pack(side="left", fill="x", expand=True)
         ttk.Button(out_row, text="Wybierz", command=self._select_output_dir).pack(side="left", padx=(8, 0))
+
+        ttk.Label(frame, text="Crop padding [pt]").pack(anchor="w")
+        ttk.Entry(frame, textvariable=self.crop_padding_var).pack(anchor="w", pady=(2, 10))
 
         self.extract_button = ttk.Button(frame, text="Start Extract", command=self._run_extract)
         self.extract_button.pack(anchor="w", pady=(0, 10))
@@ -219,7 +223,7 @@ class AppGUI(tk.Tk):
                 root_logger = logging.getLogger()
                 root_logger.addHandler(fh)
 
-                extractor = PDFExtractor(self.extract_output_dir)
+                extractor = PDFExtractor(self.extract_output_dir, crop_padding_pt=float(self.crop_padding_var.get() or 10))
                 records = extractor.extract(
                     self.source_pdf,
                     self.source_pdf.stem,
