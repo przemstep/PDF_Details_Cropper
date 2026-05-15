@@ -11,10 +11,37 @@ from .utils import save_json
 
 LOGGER = logging.getLogger(__name__)
 
+COLOR_RULES: dict[str, tuple[int, int, int]] = {
+    "detail": (0, 85, 0),
+    "drawing_table": (0, 0, 139),
+    "ignore": (255, 255, 0),
+}
+
 
 class PDFExtractor:
-    def __init__(self, intermediate_dir: Path) -> None:
+    def __init__(self, intermediate_dir: Path, color_tolerance: int = 20) -> None:
         self.intermediate_dir = intermediate_dir
+        self.color_tolerance = color_tolerance
+
+    @staticmethod
+    def _to_rgb255(color: tuple[float, float, float] | None) -> tuple[int, int, int] | None:
+        if color is None or len(color) < 3:
+            return None
+        return tuple(max(0, min(255, int(round(channel * 255)))) for channel in color[:3])
+
+    def _resolve_area_type(self, color: tuple[int, int, int] | None) -> str:
+        if color is None:
+            return "detail"
+
+        best_name = "detail"
+        best_distance = float("inf")
+        for name, target in COLOR_RULES.items():
+            distance = sum(abs(color[i] - target[i]) for i in range(3))
+            if distance < best_distance:
+                best_name = name
+                best_distance = distance
+
+        return best_name if best_distance <= self.color_tolerance * 3 else "detail"
 
     def extract(self, source_pdf: Path, project_name: str) -> list[CropRecord]:
         crop_pdf_dir = self.intermediate_dir / "crops_pdf"
@@ -32,6 +59,13 @@ class PDFExtractor:
                 while annot:
                     rect = annot.rect
                     if rect:
+                        fill_rgb = self._to_rgb255(annot.colors.get("fill") if annot.colors else None)
+                        area_type = self._resolve_area_type(fill_rgb)
+
+                        if area_type == "ignore":
+                            annot = annot.next
+                            continue
+
                         item_idx += 1
                         name = annot.info.get("name") if annot.info else None
                         crop_id = name or f"{project_name}_S{page_idx + 1}_D{item_idx}"
@@ -63,6 +97,7 @@ class PDFExtractor:
                                 ocr_used=False,
                                 crop_pdf=str(crop_pdf_path),
                                 preview_png=str(crop_png_path),
+                                area_type=area_type,
                             )
                         )
                     annot = annot.next
