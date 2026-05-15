@@ -10,6 +10,7 @@ from .classifier import DetailClassifier
 from .exporter import Exporter
 from .pdf_extractor import PDFExtractor
 from .synonym_builder import SynonymBuilder
+from .utils import ensure_log_dir
 
 
 class AppGUI(tk.Tk):
@@ -197,7 +198,8 @@ class AppGUI(tk.Tk):
 
         def worker() -> None:
             try:
-                log_path = self.extract_output_dir / "logs" / "pdf_analyzer.log"
+                log_dir = ensure_log_dir(self.extract_output_dir)
+                log_path = log_dir / "pdf_analyzer.log"
                 fh = logging.FileHandler(log_path, encoding="utf-8")
                 fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
                 root_logger = logging.getLogger()

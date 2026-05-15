@@ -7,6 +7,13 @@ import unicodedata
 from pathlib import Path
 
 
+def ensure_log_dir(output_folder: Path | str) -> Path:
+    output_folder = Path(output_folder)
+    log_dir = output_folder / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir
+
+
 def setup_logging(log_file: Path) -> None:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
