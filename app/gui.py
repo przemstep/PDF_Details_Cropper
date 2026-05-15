@@ -25,10 +25,13 @@ class AppGUI(tk.Tk):
 
         self.pdf_path_var = tk.StringVar()
         self.output_dir_var = tk.StringVar(value=str(self.extract_output_dir))
-        self.status_var = tk.StringVar(value="Status: idle")
-        self.page_status_var = tk.StringVar(value="Analizowana strona: - / -")
-        self.bbox_status_var = tk.StringVar(value="Analizowany bbox: - / -")
-        self.stage_var = tk.StringVar(value="Etap: idle")
+        self.status_vars = {}
+        self.page_status_vars = {}
+        self.bbox_status_vars = {}
+        self.count_status_vars = {}
+        self.path_status_vars = {}
+        self.stage_vars = {}
+        self.tab_logs = {}
         self.logger = logging.getLogger(__name__)
 
         nb = ttk.Notebook(self)
@@ -67,10 +70,7 @@ class AppGUI(tk.Tk):
         self.extract_button = ttk.Button(frame, text="Start Extract", command=self._run_extract)
         self.extract_button.pack(anchor="w", pady=(0, 10))
 
-        ttk.Label(frame, textvariable=self.status_var).pack(anchor="w", pady=(0, 10))
-        ttk.Label(frame, textvariable=self.page_status_var).pack(anchor="w")
-        ttk.Label(frame, textvariable=self.bbox_status_var).pack(anchor="w")
-        ttk.Label(frame, textvariable=self.stage_var).pack(anchor="w", pady=(0, 10))
+        self._build_status_panel(frame, "extract")
 
         self._create_tab_description(
             frame,
@@ -84,9 +84,6 @@ class AppGUI(tk.Tk):
             ],
         )
 
-        ttk.Label(frame, text="Status / log (INFO, WARNING, ERROR)").pack(anchor="w")
-        self.error_box = tk.Text(frame, height=12, state="disabled")
-        self.error_box.pack(fill="both", expand=True)
 
     def _build_dict_tab(self) -> None:
         self._create_tab_description(
@@ -102,6 +99,7 @@ class AppGUI(tk.Tk):
         )
         ttk.Button(self.dict_tab, text="Generate dictionary template", command=self._gen_dict).pack(pady=8)
         ttk.Button(self.dict_tab, text="Generate frequency analysis", command=self._freq).pack(pady=8)
+        self._build_status_panel(self.dict_tab, "dictionary")
 
     def _build_class_tab(self) -> None:
         self._create_tab_description(
@@ -116,6 +114,7 @@ class AppGUI(tk.Tk):
             ],
         )
         ttk.Button(self.class_tab, text="Run classification", command=self._classify).pack(pady=8)
+        self._build_status_panel(self.class_tab, "classification")
 
     def _build_export_tab(self) -> None:
         self._create_tab_description(
@@ -130,6 +129,7 @@ class AppGUI(tk.Tk):
             ],
         )
         ttk.Button(self.export_tab, text="Export metadata", command=self._export).pack(pady=8)
+        self._build_status_panel(self.export_tab, "export")
 
     def _create_tab_description(self, parent: tk.Widget, function_name: str, bullets: list[str]) -> None:
         box = ttk.LabelFrame(parent, text=f"Funkcja: {function_name}", padding=8)
@@ -149,28 +149,41 @@ class AppGUI(tk.Tk):
             self.extract_output_dir = Path(p)
             self.output_dir_var.set(str(self.extract_output_dir))
 
-    def _append_error(self, message: str) -> None:
-        self.error_box.configure(state="normal")
-        self.error_box.insert("end", f"{message}\n")
-        self.error_box.see("end")
-        self.error_box.configure(state="disabled")
+    def _build_status_panel(self, parent: tk.Widget, tab_name: str) -> None:
+        box = ttk.LabelFrame(parent, text=f"Status: {tab_name}", padding=8)
+        box.pack(fill="both", padx=8, pady=8, expand=True)
+        self.status_vars[tab_name] = tk.StringVar(value="Operacja: idle")
+        self.page_status_vars[tab_name] = tk.StringVar(value="Strona: -")
+        self.bbox_status_vars[tab_name] = tk.StringVar(value="BBox: -")
+        self.count_status_vars[tab_name] = tk.StringVar(value="Liczniki: processed=0 accepted=0 skipped=0 errors=0")
+        self.path_status_vars[tab_name] = tk.StringVar(value="Ścieżki: input=- output=-")
+        self.stage_vars[tab_name] = tk.StringVar(value="Etap: idle")
+        for var in (self.status_vars[tab_name], self.page_status_vars[tab_name], self.bbox_status_vars[tab_name], self.count_status_vars[tab_name], self.path_status_vars[tab_name], self.stage_vars[tab_name]):
+            ttk.Label(box, textvariable=var).pack(anchor="w")
+        text = tk.Text(box, height=8, state="disabled")
+        text.pack(fill="both", expand=True)
+        self.tab_logs[tab_name] = text
 
-    def update_status_panel(self, level: str, message: str) -> None:
-        self._append_error(f"[{level}] {message}")
-        if "Analizowana strona" in message:
-            self.page_status_var.set(message)
-        elif "Analizowany bbox" in message:
-            self.bbox_status_var.set(message)
-        else:
-            self.stage_var.set(f"Etap: {message}")
+    def update_status_panel(self, tab_name: str, level: str, message: str) -> None:
+        log = self.tab_logs.get(tab_name)
+        if log is not None:
+            log.configure(state="normal")
+            log.insert("end", f"[{level}] {message}\n")
+            log.see("end")
+            log.configure(state="disabled")
+        self.stage_vars.get(tab_name, tk.StringVar()).set(f"Etap: {message}")
+        if "strona=" in message:
+            self.page_status_vars[tab_name].set(f"Strona: {message}")
+        if "bbox=" in message:
+            self.bbox_status_vars[tab_name].set(f"BBox: {message}")
 
     def log_status(self, message: str) -> None:
         self.logger.info(message)
-        self.after(0, lambda: self.update_status_panel("INFO", message))
+        self.after(0, lambda: self.update_status_panel("extract", "INFO", message))
 
     def log_error(self, message: str) -> None:
         self.logger.error(message)
-        self.after(0, lambda: self.update_status_panel("ERROR", message))
+        self.after(0, lambda: self.update_status_panel("extract", "ERROR", message))
 
     def _set_extract_running(self, running: bool) -> None:
         self.is_extracting = running
@@ -183,18 +196,18 @@ class AppGUI(tk.Tk):
         pdf_path = self.pdf_path_var.get().strip()
         out_path = self.output_dir_var.get().strip()
         if not pdf_path:
-            self._append_error("Nie wybrano pliku PDF.")
+            self.update_status_panel("extract", "ERROR", "Nie wybrano pliku PDF.")
             return
         if not out_path:
-            self._append_error("Nie wybrano katalogu output.")
+            self.update_status_panel("extract", "ERROR", "Nie wybrano katalogu output.")
             return
 
         self.source_pdf = Path(pdf_path)
         self.extract_output_dir = Path(out_path)
 
         self._set_extract_running(True)
-        self.status_var.set("Status: analyzing...")
-        self.update_status_panel("INFO", "Wczytywanie PDF")
+        self.status_vars["extract"].set("Operacja: analyzing")
+        self.update_status_panel("extract", "INFO", "Wczytywanie PDF")
 
         def worker() -> None:
             try:
@@ -210,17 +223,17 @@ class AppGUI(tk.Tk):
                 records = extractor.extract(
                     self.source_pdf,
                     self.source_pdf.stem,
-                    status_callback=lambda level, msg: self.after(0, lambda: self.update_status_panel(level, msg)),
+                    status_callback=lambda tab, level, msg: self.after(0, lambda: self.update_status_panel(tab, level, msg)),
                 )
-                page_count = len({r.page for r in records})
+                page_count = len({r.page_number for r in records})
                 box_count = len(records)
-                self.after(0, lambda: self.status_var.set(f"Analyzed: {page_count} pages, {box_count} boxes"))
+                self.after(0, lambda: self.status_vars["extract"].set(f"Operacja: Analyzed {page_count} pages, {box_count} boxes"))
                 self.after(0, lambda: messagebox.showinfo("Done", "Extraction completed"))
                 root_logger.removeHandler(fh)
                 fh.close()
             except Exception as exc:  # noqa: BLE001
-                self.after(0, lambda: self._append_error(str(exc)))
-                self.after(0, lambda: self.status_var.set("Status: failed"))
+                self.after(0, lambda: self.update_status_panel("extract", "ERROR", str(exc)))
+                self.after(0, lambda: self.status_vars["extract"].set("Operacja: failed"))
             finally:
                 self.after(0, lambda: self._set_extract_running(False))
 
@@ -246,7 +259,9 @@ class AppGUI(tk.Tk):
             self.extract_output_dir / "extraction_data.xlsx",
             dict_dir / "master_dictionary.xlsx",
             self.extract_output_dir,
+            status_callback=lambda tab, level, msg: self.update_status_panel(tab, level, msg),
         )
+        self.update_status_panel("classification", "INFO", "Classification completed")
         messagebox.showinfo("Done", "Classification completed")
 
     def _export(self) -> None:

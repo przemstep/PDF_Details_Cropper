@@ -17,7 +17,7 @@ class Exporter:
         records = []
         for row in merged.itertuples(index=False):
             code = getattr(row, "proposed_code", "UNCLASSIFIED")
-            page = getattr(row, "page", 0)
+            page = getattr(row, "page_number", getattr(row, "page", 0))
             crop_id = getattr(row, "crop_id", "NA")
             filename = safe_filename(f"DET_{code}_REF-{project_name}_S{page}_{crop_id}.pdf")
             records.append({**row._asdict(), "FileName": filename, "Status": "Do weryfikacji"})
