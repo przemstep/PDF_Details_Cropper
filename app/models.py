@@ -20,10 +20,12 @@ class AnnotationBox:
 @dataclass(slots=True)
 class CropRecord:
     crop_id: str
+    base_name: str
     source_pdf: str
-    page: int
+    page_index: int
+    page_number: int
     annotation_id: str
-    bbox: tuple[float, float, float, float]
+    bbox_pdf_coords: tuple[float, float, float, float]
     raw_text: str
     text_length: int
     ocr_used: bool
