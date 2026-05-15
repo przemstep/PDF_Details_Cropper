@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -24,6 +25,10 @@ class AppGUI(tk.Tk):
         self.pdf_path_var = tk.StringVar()
         self.output_dir_var = tk.StringVar(value=str(self.extract_output_dir))
         self.status_var = tk.StringVar(value="Status: idle")
+        self.page_status_var = tk.StringVar(value="Analizowana strona: - / -")
+        self.bbox_status_var = tk.StringVar(value="Analizowany bbox: - / -")
+        self.stage_var = tk.StringVar(value="Etap: idle")
+        self.logger = logging.getLogger(__name__)
 
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True)
@@ -62,20 +67,74 @@ class AppGUI(tk.Tk):
         self.extract_button.pack(anchor="w", pady=(0, 10))
 
         ttk.Label(frame, textvariable=self.status_var).pack(anchor="w", pady=(0, 10))
+        ttk.Label(frame, textvariable=self.page_status_var).pack(anchor="w")
+        ttk.Label(frame, textvariable=self.bbox_status_var).pack(anchor="w")
+        ttk.Label(frame, textvariable=self.stage_var).pack(anchor="w", pady=(0, 10))
 
-        ttk.Label(frame, text="Błędy").pack(anchor="w")
-        self.error_box = tk.Text(frame, height=8, state="disabled")
+        self._create_tab_description(
+            frame,
+            "Extract",
+            [
+                "Co robi: Analizuje PDF i wycina bbox do plików PDF/PNG/TXT.",
+                "Dane wejściowe: Plik PDF oraz folder roboczy.",
+                "Dane wyjściowe: extraction_data.xlsx/json, wycięte szczegóły i podglądy.",
+                "Miejsce zapisu: Folder roboczy ustawiony w tej zakładce (z podfolderami).",
+                "Uwagi: To główny folder roboczy dla pozostałych funkcji, o ile funkcja nie pozwala wybrać innego.",
+            ],
+        )
+
+        ttk.Label(frame, text="Status / log (INFO, WARNING, ERROR)").pack(anchor="w")
+        self.error_box = tk.Text(frame, height=12, state="disabled")
         self.error_box.pack(fill="both", expand=True)
 
     def _build_dict_tab(self) -> None:
+        self._create_tab_description(
+            self.dict_tab,
+            "Dictionary Builder",
+            [
+                "Co robi: Buduje słownik i analizę częstotliwości z danych ekstrakcji.",
+                "Dane wejściowe: extraction_data.xlsx z folderu roboczego.",
+                "Dane wyjściowe: pliki słownika i kandydatów częstotliwości.",
+                "Miejsce zapisu: folder roboczy (podfolder dictionaries).",
+                "Uwagi: Korzysta z folderu ustawionego w Extract.",
+            ],
+        )
         ttk.Button(self.dict_tab, text="Generate dictionary template", command=self._gen_dict).pack(pady=8)
         ttk.Button(self.dict_tab, text="Generate frequency analysis", command=self._freq).pack(pady=8)
 
     def _build_class_tab(self) -> None:
+        self._create_tab_description(
+            self.class_tab,
+            "Classification",
+            [
+                "Co robi: Klasyfikuje rekordy ekstrakcji na podstawie słownika.",
+                "Dane wejściowe: extraction_data.xlsx oraz master_dictionary.xlsx.",
+                "Dane wyjściowe: classification_results.xlsx.",
+                "Miejsce zapisu: folder roboczy ustawiony w Extract.",
+                "Uwagi: Korzysta z tego samego folderu roboczego.",
+            ],
+        )
         ttk.Button(self.class_tab, text="Run classification", command=self._classify).pack(pady=8)
 
     def _build_export_tab(self) -> None:
+        self._create_tab_description(
+            self.export_tab,
+            "Export",
+            [
+                "Co robi: Eksportuje metadane projektu na podstawie ekstrakcji i klasyfikacji.",
+                "Dane wejściowe: extraction_data.xlsx i classification_results.xlsx.",
+                "Dane wyjściowe: pliki eksportu metadanych.",
+                "Miejsce zapisu: folder roboczy / exports.",
+                "Uwagi: Domyślnie używa folderu z Extract.",
+            ],
+        )
         ttk.Button(self.export_tab, text="Export metadata", command=self._export).pack(pady=8)
+
+    def _create_tab_description(self, parent: tk.Widget, function_name: str, bullets: list[str]) -> None:
+        box = ttk.LabelFrame(parent, text=f"Funkcja: {function_name}", padding=8)
+        box.pack(fill="x", padx=8, pady=8)
+        for bullet in bullets:
+            ttk.Label(box, text=f"- {bullet}", wraplength=980, justify="left").pack(anchor="w")
 
     def _select_pdf(self) -> None:
         p = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
@@ -94,6 +153,23 @@ class AppGUI(tk.Tk):
         self.error_box.insert("end", f"{message}\n")
         self.error_box.see("end")
         self.error_box.configure(state="disabled")
+
+    def update_status_panel(self, level: str, message: str) -> None:
+        self._append_error(f"[{level}] {message}")
+        if "Analizowana strona" in message:
+            self.page_status_var.set(message)
+        elif "Analizowany bbox" in message:
+            self.bbox_status_var.set(message)
+        else:
+            self.stage_var.set(f"Etap: {message}")
+
+    def log_status(self, message: str) -> None:
+        self.logger.info(message)
+        self.after(0, lambda: self.update_status_panel("INFO", message))
+
+    def log_error(self, message: str) -> None:
+        self.logger.error(message)
+        self.after(0, lambda: self.update_status_panel("ERROR", message))
 
     def _set_extract_running(self, running: bool) -> None:
         self.is_extracting = running
@@ -117,14 +193,28 @@ class AppGUI(tk.Tk):
 
         self._set_extract_running(True)
         self.status_var.set("Status: analyzing...")
+        self.update_status_panel("INFO", "Wczytywanie PDF")
 
         def worker() -> None:
             try:
-                records = PDFExtractor(self.extract_output_dir).extract(self.source_pdf, self.source_pdf.stem)
+                log_path = self.extract_output_dir / "logs" / "pdf_analyzer.log"
+                fh = logging.FileHandler(log_path, encoding="utf-8")
+                fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+                root_logger = logging.getLogger()
+                root_logger.addHandler(fh)
+
+                extractor = PDFExtractor(self.extract_output_dir)
+                records = extractor.extract(
+                    self.source_pdf,
+                    self.source_pdf.stem,
+                    status_callback=lambda level, msg: self.after(0, lambda: self.update_status_panel(level, msg)),
+                )
                 page_count = len({r.page for r in records})
                 box_count = len(records)
                 self.after(0, lambda: self.status_var.set(f"Analyzed: {page_count} pages, {box_count} boxes"))
                 self.after(0, lambda: messagebox.showinfo("Done", "Extraction completed"))
+                root_logger.removeHandler(fh)
+                fh.close()
             except Exception as exc:  # noqa: BLE001
                 self.after(0, lambda: self._append_error(str(exc)))
                 self.after(0, lambda: self.status_var.set("Status: failed"))
@@ -134,28 +224,35 @@ class AppGUI(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _gen_dict(self) -> None:
-        SynonymBuilder(self.root_dir / "data/dictionaries/master_dictionary.xlsx").ensure_dictionary_template()
+        dict_dir = self.extract_output_dir / "dictionaries"
+        dict_dir.mkdir(parents=True, exist_ok=True)
+        SynonymBuilder(dict_dir / "master_dictionary.xlsx").ensure_dictionary_template()
         messagebox.showinfo("Done", "Dictionary template generated")
 
     def _freq(self) -> None:
-        sb = SynonymBuilder(self.root_dir / "data/dictionaries/master_dictionary.xlsx")
-        freq = sb.analyze_extractions(self.root_dir / "intermediate/extraction_data.xlsx")
-        freq.to_excel(self.root_dir / "data/dictionaries/frequency_candidates.xlsx", index=False)
+        dict_dir = self.extract_output_dir / "dictionaries"
+        dict_dir.mkdir(parents=True, exist_ok=True)
+        sb = SynonymBuilder(dict_dir / "master_dictionary.xlsx")
+        freq = sb.analyze_extractions(self.extract_output_dir / "extraction_data.xlsx")
+        freq.to_excel(dict_dir / "frequency_candidates.xlsx", index=False)
         messagebox.showinfo("Done", "Frequency analysis exported")
 
     def _classify(self) -> None:
+        dict_dir = self.extract_output_dir / "dictionaries"
         DetailClassifier().classify(
-            self.root_dir / "intermediate/extraction_data.xlsx",
-            self.root_dir / "data/dictionaries/master_dictionary.xlsx",
-            self.root_dir / "intermediate",
+            self.extract_output_dir / "extraction_data.xlsx",
+            dict_dir / "master_dictionary.xlsx",
+            self.extract_output_dir,
         )
         messagebox.showinfo("Done", "Classification completed")
 
     def _export(self) -> None:
+        export_dir = self.extract_output_dir / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
         Exporter().export(
-            self.root_dir / "intermediate/extraction_data.xlsx",
-            self.root_dir / "intermediate/classification_results.xlsx",
-            self.root_dir / "output",
+            self.extract_output_dir / "extraction_data.xlsx",
+            self.extract_output_dir / "classification_results.xlsx",
+            export_dir,
             "PROJECT",
         )
         messagebox.showinfo("Done", "Metadata exported")
