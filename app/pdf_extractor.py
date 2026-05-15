@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -15,15 +16,47 @@ LOGGER = logging.getLogger(__name__)
 
 COLOR_RULES: dict[str, tuple[int, int, int]] = {
     "detail": (0, 85, 0),
-    "drawing_table": (0, 0, 139),
+    "titleblock": (0, 0, 139),
     "ignore": (255, 255, 0),
 }
 
+MIN_CROP_WIDTH_PT = 50
+MIN_CROP_HEIGHT_PT = 30
+MIN_CROP_AREA_PT2 = 2000
+MAX_CROP_WIDTH_PAGE_RATIO = 0.95
+MAX_CROP_HEIGHT_PAGE_RATIO = 0.95
+MAX_CROP_AREA_PAGE_RATIO = 0.90
+
+
+def crop_record_to_dict(record: object) -> dict:
+    if is_dataclass(record):
+        return asdict(record)
+    if hasattr(record, "model_dump"):
+        return record.model_dump()
+    if hasattr(record, "_asdict"):
+        return record._asdict()
+    if hasattr(record, "to_dict"):
+        return record.to_dict()
+    return {
+        "crop_id": getattr(record, "crop_id", ""),
+        "source_pdf": getattr(record, "source_pdf", ""),
+        "page": getattr(record, "page", 0),
+        "annotation_id": getattr(record, "annotation_id", ""),
+        "bbox": getattr(record, "bbox", None),
+        "raw_text": getattr(record, "raw_text", ""),
+        "text_length": getattr(record, "text_length", 0),
+        "ocr_used": getattr(record, "ocr_used", False),
+        "crop_pdf": getattr(record, "crop_pdf", ""),
+        "preview_png": getattr(record, "preview_png", ""),
+        "area_type": getattr(record, "area_type", "unknown"),
+    }
+
 
 class PDFExtractor:
-    def __init__(self, intermediate_dir: Path, color_tolerance: int = 20) -> None:
+    def __init__(self, intermediate_dir: Path, color_tolerance: int = 3, author_filter: str | None = None) -> None:
         self.intermediate_dir = intermediate_dir
         self.color_tolerance = color_tolerance
+        self.author_filter = author_filter
 
     @staticmethod
     def _to_rgb255(color: tuple[float, float, float] | None) -> tuple[int, int, int] | None:
@@ -31,19 +64,32 @@ class PDFExtractor:
             return None
         return tuple(max(0, min(255, int(round(channel * 255)))) for channel in color[:3])
 
-    def _resolve_area_type(self, color: tuple[int, int, int] | None) -> str:
-        if color is None:
-            return "detail"
+    def _resolve_area_type(self, stroke: tuple[int, int, int] | None, fill: tuple[int, int, int] | None) -> str:
+        colors = [c for c in (stroke, fill) if c is not None]
+        if not colors:
+            return "unknown"
+        for color in colors:
+            for name, target in COLOR_RULES.items():
+                if all(abs(color[i] - target[i]) <= self.color_tolerance for i in range(3)):
+                    return name
+        return "unknown"
 
-        best_name = "detail"
-        best_distance = float("inf")
-        for name, target in COLOR_RULES.items():
-            distance = sum(abs(color[i] - target[i]) for i in range(3))
-            if distance < best_distance:
-                best_name = name
-                best_distance = distance
-
-        return best_name if best_distance <= self.color_tolerance * 3 else "detail"
+    def _validate_bbox(self, clip: fitz.Rect, page_rect: fitz.Rect) -> str | None:
+        width, height = clip.width, clip.height
+        area = width * height
+        if width < MIN_CROP_WIDTH_PT:
+            return f"width<{MIN_CROP_WIDTH_PT}"
+        if height < MIN_CROP_HEIGHT_PT:
+            return f"height<{MIN_CROP_HEIGHT_PT}"
+        if area < MIN_CROP_AREA_PT2:
+            return f"area<{MIN_CROP_AREA_PT2}"
+        if width / page_rect.width > MAX_CROP_WIDTH_PAGE_RATIO:
+            return "too_wide"
+        if height / page_rect.height > MAX_CROP_HEIGHT_PAGE_RATIO:
+            return "too_tall"
+        if area / (page_rect.width * page_rect.height) > MAX_CROP_AREA_PAGE_RATIO:
+            return "too_large_area"
+        return None
 
     @staticmethod
     def sanitize_clip(rect: fitz.Rect | tuple[float, float, float, float], page_rect: fitz.Rect, min_size: float = 1.0) -> fitz.Rect | None:
@@ -88,6 +134,7 @@ class PDFExtractor:
         emit("INFO", "Wczytywanie PDF")
 
         records: list[CropRecord] = []
+        report_rows: list[dict] = []
         processed_bbox = 0
         skipped_bbox = 0
         errors = 0
@@ -102,20 +149,24 @@ class PDFExtractor:
                     rect = annot.rect
                     if rect:
                         detected_bbox += 1
+                        annot_type = annot.type
+                        annot_type_name = annot_type[1] if annot_type else ""
+                        stroke_rgb = self._to_rgb255(annot.colors.get("stroke") if annot.colors else None)
                         fill_rgb = self._to_rgb255(annot.colors.get("fill") if annot.colors else None)
-                        area_type = self._resolve_area_type(fill_rgb)
-
-                        if area_type == "ignore":
-                            annot = annot.next
-                            continue
+                        area_type = self._resolve_area_type(stroke_rgb, fill_rgb)
 
                         item_idx += 1
-                        name = annot.info.get("name") if annot.info else None
+                        info = annot.info or {}
+                        name = info.get("name")
+                        subject = info.get("subject", "")
+                        author = info.get("title", "")
                         crop_id = name or f"{project_name}_S{page_idx + 1}_D{item_idx}"
-                        text = page.get_text("text", clip=rect) or ""
+                        width = rect.width
+                        height = rect.height
+                        area = width * height
 
                         emit("INFO", f"Analizowany bbox: {item_idx} (strona {page_idx + 1})")
-                        emit("INFO", f"Strona {page_idx + 1}, bbox {item_idx}: analiza")
+                        emit("INFO", f"Strona {page_idx + 1}, bbox {item_idx}: type={annot_type_name}, stroke={stroke_rgb}, fill={fill_rgb}, class={area_type}")
                         LOGGER.info("PAGE RECT: %s", page.rect)
                         LOGGER.info("RAW BBOX: %s", rect)
 
@@ -124,6 +175,13 @@ class PDFExtractor:
                         if clip is None:
                             skipped_bbox += 1
                             errors += 1
+                            report_rows.append({
+                                "source_pdf": source_pdf.name, "page_number": page_idx + 1, "annotation_index": item_idx,
+                                "type": annot_type_name, "name": name, "subject": subject, "author": author,
+                                "stroke_rgb": stroke_rgb, "fill_rgb": fill_rgb, "classification": area_type,
+                                "bbox": (rect.x0, rect.y0, rect.x1, rect.y1), "width": width, "height": height, "area": area,
+                                "status": "skipped", "errors": "invalid_clip", "output_pdf": "", "output_png": "",
+                            })
                             LOGGER.error(
                                 "Strona %s, bbox %s: pominięto błędny bbox: %s",
                                 page_idx + 1,
@@ -131,6 +189,47 @@ class PDFExtractor:
                                 rect,
                             )
                             emit("ERROR", f"Błąd: Strona {page_idx + 1}, bbox {item_idx} — pominięto błędny bbox")
+                            annot = annot.next
+                            continue
+
+                        if not (annot_type and (annot_type[0] == fitz.PDF_ANNOT_SQUARE or annot_type_name == "Square")):
+                            skipped_bbox += 1
+                            report_rows.append({"source_pdf": source_pdf.name, "page_number": page_idx + 1, "annotation_index": item_idx,
+                                "type": annot_type_name, "name": name, "subject": subject, "author": author,
+                                "stroke_rgb": stroke_rgb, "fill_rgb": fill_rgb, "classification": area_type,
+                                "bbox": (clip.x0, clip.y0, clip.x1, clip.y1), "width": clip.width, "height": clip.height, "area": clip.width*clip.height,
+                                "status": "skipped", "errors": "not_square", "output_pdf": "", "output_png": ""})
+                            annot = annot.next
+                            continue
+
+                        if self.author_filter and author != self.author_filter:
+                            skipped_bbox += 1
+                            report_rows.append({"source_pdf": source_pdf.name, "page_number": page_idx + 1, "annotation_index": item_idx,
+                                "type": annot_type_name, "name": name, "subject": subject, "author": author,
+                                "stroke_rgb": stroke_rgb, "fill_rgb": fill_rgb, "classification": area_type,
+                                "bbox": (clip.x0, clip.y0, clip.x1, clip.y1), "width": clip.width, "height": clip.height, "area": clip.width*clip.height,
+                                "status": "skipped", "errors": "author_mismatch", "output_pdf": "", "output_png": ""})
+                            annot = annot.next
+                            continue
+
+                        size_error = self._validate_bbox(clip, page.rect)
+                        if size_error:
+                            skipped_bbox += 1
+                            report_rows.append({"source_pdf": source_pdf.name, "page_number": page_idx + 1, "annotation_index": item_idx,
+                                "type": annot_type_name, "name": name, "subject": subject, "author": author,
+                                "stroke_rgb": stroke_rgb, "fill_rgb": fill_rgb, "classification": area_type,
+                                "bbox": (clip.x0, clip.y0, clip.x1, clip.y1), "width": clip.width, "height": clip.height, "area": clip.width*clip.height,
+                                "status": "skipped", "errors": size_error, "output_pdf": "", "output_png": ""})
+                            annot = annot.next
+                            continue
+
+                        if area_type != "detail":
+                            skipped_bbox += 1
+                            report_rows.append({"source_pdf": source_pdf.name, "page_number": page_idx + 1, "annotation_index": item_idx,
+                                "type": annot_type_name, "name": name, "subject": subject, "author": author,
+                                "stroke_rgb": stroke_rgb, "fill_rgb": fill_rgb, "classification": area_type,
+                                "bbox": (clip.x0, clip.y0, clip.x1, clip.y1), "width": clip.width, "height": clip.height, "area": clip.width*clip.height,
+                                "status": "skipped", "errors": f"classification_{area_type}", "output_pdf": "", "output_png": ""})
                             annot = annot.next
                             continue
 
@@ -164,14 +263,38 @@ class PDFExtractor:
                                 crop_pdf=str(crop_pdf_path),
                                 preview_png=str(crop_png_path),
                                 area_type=area_type,
+                                annotation_index=item_idx,
+                                annotation_type=annot_type_name,
+                                annotation_name=name or "",
+                                annotation_subject=subject,
+                                author=author,
+                                stroke_rgb=stroke_rgb,
+                                fill_rgb=fill_rgb,
+                                border_width=(annot.border or {}).get("width") if annot.border else None,
+                                border_style=str((annot.border or {}).get("style")) if annot.border else "",
+                                opacity_value=annot.opacity,
+                                width=clip.width,
+                                height=clip.height,
+                                area=clip.width * clip.height,
+                                status="exported",
                             )
                         )
+                        report_rows.append({
+                            "source_pdf": source_pdf.name, "page_number": page_idx + 1, "annotation_index": item_idx,
+                            "type": annot_type_name, "name": name, "subject": subject, "author": author,
+                            "stroke_rgb": stroke_rgb, "fill_rgb": fill_rgb, "classification": area_type,
+                            "bbox": (clip.x0, clip.y0, clip.x1, clip.y1), "width": clip.width, "height": clip.height, "area": clip.width * clip.height,
+                            "status": "exported", "errors": "", "output_pdf": str(crop_pdf_path), "output_png": str(crop_png_path),
+                        })
                     annot = annot.next
 
         emit("INFO", "Eksport danych")
-        df = pd.DataFrame([r.__dict__ for r in records])
+        df = pd.DataFrame([crop_record_to_dict(r) for r in records])
         df.to_excel(self.intermediate_dir / "extraction_data.xlsx", index=False)
-        save_json(self.intermediate_dir / "extraction_data.json", [r.__dict__ for r in records])
+        save_json(self.intermediate_dir / "extraction_data.json", [crop_record_to_dict(r) for r in records])
+        report_df = pd.DataFrame(report_rows)
+        report_df.to_csv(self.intermediate_dir / "extraction_report.csv", index=False)
+        save_json(self.intermediate_dir / "extraction_report.json", report_rows)
         emit("INFO", "Zakończono")
         emit(
             "INFO",

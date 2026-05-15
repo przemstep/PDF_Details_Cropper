@@ -200,6 +200,7 @@ class AppGUI(tk.Tk):
             try:
                 log_dir = ensure_log_dir(self.extract_output_dir)
                 log_path = log_dir / "pdf_analyzer.log"
+                log_path.parent.mkdir(parents=True, exist_ok=True)
                 fh = logging.FileHandler(log_path, encoding="utf-8")
                 fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
                 root_logger = logging.getLogger()

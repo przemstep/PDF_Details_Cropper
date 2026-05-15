@@ -30,6 +30,21 @@ class CropRecord:
     crop_pdf: str
     preview_png: str
     area_type: str = "detail"
+    annotation_index: int = 0
+    annotation_type: str = ""
+    annotation_name: str = ""
+    annotation_subject: str = ""
+    author: str = ""
+    stroke_rgb: tuple[int, int, int] | None = None
+    fill_rgb: tuple[int, int, int] | None = None
+    border_width: float | None = None
+    border_style: str = ""
+    opacity_value: float | None = None
+    width: float = 0.0
+    height: float = 0.0
+    area: float = 0.0
+    status: str = "accepted"
+    errors: str = ""
 
 
 @dataclass(slots=True)
