@@ -29,6 +29,7 @@ class CropRecord:
     ocr_used: bool
     crop_pdf: str
     preview_png: str
+    area_type: str = "detail"
 
 
 @dataclass(slots=True)
