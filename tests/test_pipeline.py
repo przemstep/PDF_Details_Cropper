@@ -14,7 +14,7 @@ def make_dict(path: Path):
 
 
 def test_classification_always_writes_report(tmp_path: Path):
-    ex = pd.DataFrame([{"crop_id":"c1","raw_text":"brak"},{"crop_id":"c2","raw_text":"pompa"}])
+    ex = pd.DataFrame([{"crop_id": "c1", "raw_text": "brak"}, {"crop_id": "c2", "raw_text": "pompa"}])
     ex_path = tmp_path / "extraction_data.xlsx"
     ex.to_excel(ex_path, index=False)
     dpath = tmp_path / "master_dictionary.xlsx"
@@ -33,12 +33,33 @@ def test_sanitize_clip_rules(tmp_path: Path):
     assert PDFExtractor.sanitize_clip((5, 5, 5, 10), page) is None
 
 
+def test_resolve_annotation_crop_rect_padding_and_page_clamp(tmp_path: Path):
+    pdf_path = tmp_path / "pad.pdf"
+    doc = fitz.open()
+    p = doc.new_page(width=200, height=200)
+    a = p.add_rect_annot(fitz.Rect(5, 5, 30, 30))
+    a.set_colors(stroke=(0, 85 / 255, 0))
+    a.update()
+    doc.save(pdf_path)
+    doc.close()
+
+    with fitz.open(pdf_path) as doc2:
+        page = doc2[0]
+        annot = page.first_annot
+        ex = PDFExtractor(tmp_path, crop_padding_pt=10)
+        clip, annot_rect, _ = ex.resolve_annotation_crop_rect(annot, page)
+        assert clip is not None and annot_rect is not None
+        assert clip.x0 == 0 and clip.y0 == 0
+        assert clip.x1 >= annot_rect.x1 and clip.y1 >= annot_rect.y1
+        assert clip in page.rect
+
+
 def test_page_number_naming_and_record_single_bbox(tmp_path: Path):
     pdf_path = tmp_path / "a.pdf"
     doc = fitz.open()
     p = doc.new_page(width=200, height=200)
     a = p.add_rect_annot(fitz.Rect(10, 10, 100, 100))
-    a.set_colors(stroke=(0, 85/255, 0))
+    a.set_colors(stroke=(0, 85 / 255, 0))
     a.update()
     doc.save(pdf_path)
     doc.close()
@@ -50,3 +71,28 @@ def test_page_number_naming_and_record_single_bbox(tmp_path: Path):
     assert "page_001" in r.base_name
     assert Path(r.crop_pdf).stem == Path(r.preview_png).stem == r.base_name
     assert r.page_index == 0 and r.page_number == 1
+    assert r.annotation_rect_pdf_coords is not None
+    assert r.bbox_pdf_coords[0] <= r.annotation_rect_pdf_coords[0]
+
+
+def test_invalid_empty_non_finite_bbox_skipped(tmp_path: Path):
+    page = fitz.Rect(0, 0, 100, 100)
+    assert PDFExtractor.sanitize_clip((1, 1, 1, 3), page) is None
+    assert PDFExtractor.sanitize_clip((1, 1, float("inf"), 3), page) is None
+
+
+def test_png_without_annots(tmp_path: Path):
+    pdf_path = tmp_path / "annot.pdf"
+    doc = fitz.open()
+    p = doc.new_page(width=200, height=200)
+    p.draw_rect(fitz.Rect(30, 30, 170, 170), color=(0, 0, 0), width=2)
+    a = p.add_rect_annot(fitz.Rect(20, 20, 180, 180))
+    a.set_colors(stroke=(0, 85 / 255, 0))
+    a.update()
+    doc.save(pdf_path)
+    doc.close()
+
+    out = tmp_path / "out"
+    rec = PDFExtractor(out).extract(pdf_path, "proj")[0]
+    pix = fitz.Pixmap(rec.preview_png)
+    assert pix.alpha == 0

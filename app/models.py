@@ -31,6 +31,8 @@ class CropRecord:
     ocr_used: bool
     crop_pdf: str
     preview_png: str
+    annotation_rect_pdf_coords: tuple[float, float, float, float] | None = None
+    annotation_bound_pdf_coords: tuple[float, float, float, float] | None = None
     area_type: str = "detail"
     annotation_index: int = 0
     annotation_type: str = ""
@@ -47,6 +49,7 @@ class CropRecord:
     area: float = 0.0
     status: str = "accepted"
     errors: str = ""
+
 
 
 @dataclass(slots=True)
