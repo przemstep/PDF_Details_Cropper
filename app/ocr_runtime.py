@@ -17,6 +17,7 @@ class OCRRuntimeStatus:
     tesseract_path: str
     tessdata_path: str
     languages: str
+    diagnostics: dict[str, str] | None = None
 
 
 class OCRRuntime:
@@ -36,7 +37,8 @@ class OCRRuntime:
             import pytesseract
         except Exception as exc:  # noqa: BLE001
             LOGGER.error("ocr.pytesseract_import_error error=%s", exc)
-            return OCRRuntimeStatus("missing", "OCR missing", str(path), "", langs)
+            LOGGER.error("Install dependency: pip install pytesseract Pillow")
+            return OCRRuntimeStatus("missing_python_dependency", "OCR Python dependency missing: pytesseract", str(path), "", langs)
 
         pytesseract.pytesseract.tesseract_cmd = str(path)
         tessdata_path = path.parent / "tessdata"
@@ -62,3 +64,49 @@ class OCRRuntime:
             )
 
         return OCRRuntimeStatus("available", "OCR initialized", str(path), str(tessdata_path), langs)
+
+    def diagnostic_test(self) -> OCRRuntimeStatus:
+        langs = self.settings.ocr_languages or "eng+pol"
+        path, source = resolve_tesseract_path(self.root_dir, self.settings)
+        LOGGER.info("ocr.detected_tesseract_path path=%s source=%s", path, source)
+
+        diagnostics: dict[str, str] = {}
+
+        if path.exists() and path.is_file():
+            diagnostics["tesseract_exe"] = "ok"
+        else:
+            diagnostics["tesseract_exe"] = "missing"
+
+        tessdata_path = path.parent / "tessdata"
+        lang_checks: list[str] = []
+        for lang in [x.strip() for x in langs.split("+") if x.strip()]:
+            trained = tessdata_path / f"{lang}.traineddata"
+            if trained.exists():
+                lang_checks.append(f"{lang}:ok")
+            else:
+                lang_checks.append(f"{lang}:missing")
+        diagnostics["tessdata"] = ", ".join(lang_checks)
+
+        try:
+            import pytesseract  # noqa: F401
+
+            diagnostics["pytesseract_import"] = "ok"
+        except Exception as exc:  # noqa: BLE001
+            diagnostics["pytesseract_import"] = f"missing ({exc})"
+            LOGGER.error("ocr.pytesseract_import_error error=%s", exc)
+            LOGGER.error("Install dependency: pip install pytesseract Pillow")
+
+        if diagnostics["tesseract_exe"] != "ok":
+            state = "missing"
+            message = "OCR missing"
+        elif "missing" in diagnostics["tessdata"]:
+            state = "missing_lang"
+            message = "Missing language data"
+        elif diagnostics["pytesseract_import"] != "ok":
+            state = "missing_python_dependency"
+            message = "OCR Python dependency missing: pytesseract"
+        else:
+            state = "available"
+            message = "OCR initialized"
+
+        return OCRRuntimeStatus(state, message, str(path), str(tessdata_path), langs, diagnostics)
