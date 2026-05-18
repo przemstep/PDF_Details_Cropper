@@ -1,9 +1,24 @@
 from pathlib import Path
 import pandas as pd
 import fitz
+import pytest
 
 from app.classifier import DetailClassifier
 from app.pdf_extractor import PDFExtractor
+from app.settings import AppSettings
+
+
+@pytest.fixture
+def minimal_settings() -> AppSettings:
+    return AppSettings()
+
+
+@pytest.fixture
+def extractor_factory(tmp_path: Path, minimal_settings: AppSettings):
+    def _create(intermediate_dir: Path, **kwargs) -> PDFExtractor:
+        return PDFExtractor(intermediate_dir=intermediate_dir, root_dir=tmp_path, settings=minimal_settings, **kwargs)
+
+    return _create
 
 
 def make_dict(path: Path):
@@ -56,7 +71,7 @@ def test_sanitize_clip_rules(tmp_path: Path):
     assert PDFExtractor.sanitize_clip((5, 5, 5, 10), page) is None
 
 
-def test_resolve_annotation_crop_rect_padding_and_page_clamp(tmp_path: Path):
+def test_resolve_annotation_crop_rect_padding_and_page_clamp(tmp_path: Path, extractor_factory):
     pdf_path = tmp_path / "pad.pdf"
     doc = fitz.open()
     p = doc.new_page(width=200, height=200)
@@ -69,7 +84,7 @@ def test_resolve_annotation_crop_rect_padding_and_page_clamp(tmp_path: Path):
     with fitz.open(pdf_path) as doc2:
         page = doc2[0]
         annot = page.first_annot
-        ex = PDFExtractor(tmp_path, crop_padding_pt=10)
+        ex = extractor_factory(tmp_path, crop_padding_pt=10)
         clip, annot_rect, _ = ex.resolve_annotation_crop_rect(annot, page)
         assert clip is not None and annot_rect is not None
         assert clip.x0 == 0 and clip.y0 == 0
@@ -77,7 +92,7 @@ def test_resolve_annotation_crop_rect_padding_and_page_clamp(tmp_path: Path):
         assert clip in page.rect
 
 
-def test_page_number_naming_and_record_single_bbox(tmp_path: Path):
+def test_page_number_naming_and_record_single_bbox(tmp_path: Path, extractor_factory):
     pdf_path = tmp_path / "a.pdf"
     doc = fitz.open()
     p = doc.new_page(width=200, height=200)
@@ -88,7 +103,7 @@ def test_page_number_naming_and_record_single_bbox(tmp_path: Path):
     doc.close()
 
     out = tmp_path / "out"
-    recs = PDFExtractor(out).extract(pdf_path, "proj")
+    recs = extractor_factory(out).extract(pdf_path, "proj")
     assert recs
     r = recs[0]
     assert "page_001" in r.base_name
@@ -104,7 +119,7 @@ def test_invalid_empty_non_finite_bbox_skipped(tmp_path: Path):
     assert PDFExtractor.sanitize_clip((1, 1, float("inf"), 3), page) is None
 
 
-def test_png_without_annots(tmp_path: Path):
+def test_png_without_annots(tmp_path: Path, extractor_factory):
     pdf_path = tmp_path / "annot.pdf"
     doc = fitz.open()
     p = doc.new_page(width=200, height=200)
@@ -116,6 +131,6 @@ def test_png_without_annots(tmp_path: Path):
     doc.close()
 
     out = tmp_path / "out"
-    rec = PDFExtractor(out).extract(pdf_path, "proj")[0]
+    rec = extractor_factory(out).extract(pdf_path, "proj")[0]
     pix = fitz.Pixmap(rec.preview_png)
     assert pix.alpha == 0
