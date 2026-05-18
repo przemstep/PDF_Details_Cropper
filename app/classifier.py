@@ -25,6 +25,52 @@ class DetailClassifier:
                 return col
         return None
 
+    def build_synonyms_from_elements(self, elements: pd.DataFrame) -> pd.DataFrame:
+        if elements.empty:
+            return pd.DataFrame(columns=["ElementCode", "Phrase", "Weight", "MatchType", "Active"])
+
+        code_col = self._find_col(elements, "ElementCode") or self._find_col(elements, "Code")
+        if not code_col:
+            return pd.DataFrame(columns=["ElementCode", "Phrase", "Weight", "MatchType", "Active"])
+
+        pl_col = (
+            self._find_col(elements, "NamePL")
+            or self._find_col(elements, "PolishName")
+            or self._find_col(elements, "Name_PL")
+            or self._find_col(elements, "nazwa polska")
+        )
+        en_col = (
+            self._find_col(elements, "NameEN")
+            or self._find_col(elements, "EnglishName")
+            or self._find_col(elements, "Name_EN")
+            or self._find_col(elements, "nazwa angielska")
+        )
+        category_col = (
+            self._find_col(elements, "Category")
+            or self._find_col(elements, "Family")
+            or self._find_col(elements, "Group")
+        )
+
+        rows: list[dict[str, object]] = []
+
+        def add_row(code: str, phrase_val: object, weight: float) -> None:
+            phrase = normalize_text(str(phrase_val)) if phrase_val is not None else ""
+            if not code or not phrase or phrase.lower() == "nan":
+                return
+            rows.append({"ElementCode": code, "Phrase": phrase, "Weight": weight, "MatchType": "exact", "Active": True})
+
+        for element in elements.itertuples(index=False):
+            code = str(getattr(element, code_col, "")).strip()
+            add_row(code, getattr(element, pl_col, "") if pl_col else "", 1.0)
+            add_row(code, getattr(element, en_col, "") if en_col else "", 1.0)
+            add_row(code, getattr(element, category_col, "") if category_col else "", 0.35)
+
+        if not rows:
+            return pd.DataFrame(columns=["ElementCode", "Phrase", "Weight", "MatchType", "Active"])
+
+        synonyms = pd.DataFrame(rows)
+        return synonyms.drop_duplicates(subset=["ElementCode", "Phrase"]).reset_index(drop=True)
+
     def classify(self, extraction_path: Path, dictionary_path: Path, output_dir: Path, status_callback: Callable[[str, str, str], None] | None = None) -> list[ClassificationResult]:
         def emit(level: str, msg: str) -> None:
             if status_callback:
@@ -46,10 +92,22 @@ class DetailClassifier:
             raise RuntimeError(f"Nieczytelny master_dictionary: {exc}") from exc
 
         if synonyms.empty:
-            raise RuntimeError("master_dictionary (Synonyms) jest pusty")
+            emit("WARN", "Synonyms jest pusty - buduję bazowe synonimy z arkusza Elements")
+            synonyms = self.build_synonyms_from_elements(elements)
 
-        elem_code_col = self._find_col(elements, "ElementCode") or "ElementCode"
-        elem_meta = {getattr(r, elem_code_col): r for r in elements.itertuples(index=False)}
+        elem_code_col = self._find_col(elements, "ElementCode") or self._find_col(elements, "Code")
+        elem_meta = {getattr(r, elem_code_col): r for r in elements.itertuples(index=False)} if elem_code_col else {}
+
+        syn_active_col = self._find_col(synonyms, "Active") or "Active"
+        syn_phrase_col = self._find_col(synonyms, "Phrase") or "Phrase"
+        syn_code_col = self._find_col(synonyms, "ElementCode") or "ElementCode"
+        syn_weight_col = self._find_col(synonyms, "Weight") or "Weight"
+        syn_match_type_col = self._find_col(synonyms, "MatchType") or "MatchType"
+
+        neg_phrase_col = self._find_col(negative, "Phrase") or "Phrase"
+        neg_code_col = self._find_col(negative, "ElementCode") or "ElementCode"
+        neg_penalty_col = self._find_col(negative, "Penalty") or "Penalty"
+        priority_attr = self._find_col(elements, "Priority") or "Priority"
 
         for idx, row in enumerate(ex.itertuples(index=False), start=1):
             emit("INFO", f"processing={idx}/{len(ex)}")
@@ -61,14 +119,14 @@ class DetailClassifier:
             err = ""
             try:
                 for syn in synonyms.itertuples(index=False):
-                    if not bool(getattr(syn, self._find_col(synonyms, "Active") or "Active", True)):
+                    if not bool(getattr(syn, syn_active_col, True)):
                         continue
-                    phrase = normalize_text(str(getattr(syn, self._find_col(synonyms, "Phrase") or "Phrase", "")))
+                    phrase = normalize_text(str(getattr(syn, syn_phrase_col, "")))
                     phrase = ascii_text(phrase).lower()
                     if phrase and phrase in txt_ascii:
-                        code = str(getattr(syn, self._find_col(synonyms, "ElementCode") or "ElementCode"))
-                        weight = float(getattr(syn, self._find_col(synonyms, "Weight") or "Weight", 1.0))
-                        match_type = str(getattr(syn, self._find_col(synonyms, "MatchType") or "MatchType", "")).lower()
+                        code = str(getattr(syn, syn_code_col))
+                        weight = float(getattr(syn, syn_weight_col, 1.0))
+                        match_type = str(getattr(syn, syn_match_type_col, "")).lower()
                         boost = weight * (1.3 if " " in phrase else 1.0)
                         if match_type == "fuzzy":
                             boost *= 0.7
@@ -76,15 +134,14 @@ class DetailClassifier:
                         matched[code].append(phrase)
 
                 for neg in negative.itertuples(index=False):
-                    phrase = ascii_text(normalize_text(str(getattr(neg, self._find_col(negative, "Phrase") or "Phrase", "")))).lower()
+                    phrase = ascii_text(normalize_text(str(getattr(neg, neg_phrase_col, "")))).lower()
                     if phrase and phrase in txt_ascii:
-                        code = str(getattr(neg, self._find_col(negative, "ElementCode") or "ElementCode"))
-                        penalty = float(getattr(neg, self._find_col(negative, "Penalty") or "Penalty", 0.0))
+                        code = str(getattr(neg, neg_code_col))
+                        penalty = float(getattr(neg, neg_penalty_col, 0.0))
                         scores[code] -= penalty
 
                 weighted = {}
                 for code, s in scores.items():
-                    priority_attr = self._find_col(elements, "Priority") or "Priority"
                     priority = getattr(elem_meta.get(code), priority_attr, 100) if elem_meta.get(code) is not None else 100
                     weighted[code] = s * (float(priority) / 100.0)
 

@@ -26,6 +26,29 @@ def test_classification_always_writes_report(tmp_path: Path):
     assert set(rep["status"]) == {"matched", "unmatched"}
 
 
+def test_build_synonyms_from_elements_when_synonyms_empty(tmp_path: Path):
+    extraction_path = tmp_path / "extraction_data.xlsx"
+    pd.DataFrame([{"crop_id": "c1", "raw_text": "detail steel roof"}]).to_excel(extraction_path, index=False)
+
+    dictionary_path = tmp_path / "master_dictionary.xlsx"
+    with pd.ExcelWriter(dictionary_path) as writer:
+        pd.DataFrame(
+            [{"ElementCode": "RF.STL", "NamePL": "Dach stalowy", "NameEN": "Steel Roof", "Category": "Dach", "Priority": 90}]
+        ).to_excel(writer, sheet_name="Elements", index=False)
+        pd.DataFrame(columns=["ElementCode", "Phrase", "Weight", "MatchType", "Active"]).to_excel(writer, sheet_name="Synonyms", index=False)
+        pd.DataFrame(columns=["ElementCode", "Phrase", "Penalty"]).to_excel(writer, sheet_name="NegativeSynonyms", index=False)
+
+    output_dir = tmp_path / "out"
+    results = DetailClassifier().classify(extraction_path, dictionary_path, output_dir)
+
+    assert (output_dir / "classification_report.xlsx").exists()
+    assert results[0].proposed_code == "RF.STL"
+
+    report = pd.read_excel(output_dir / "classification_report.xlsx")
+    assert report.loc[0, "status"] == "matched"
+    assert report.loc[0, "classification_code"] == "RF.STL"
+
+
 def test_sanitize_clip_rules(tmp_path: Path):
     page = fitz.Rect(0, 0, 100, 100)
     assert PDFExtractor.sanitize_clip((1, 1, 2, 2), page) is not None
