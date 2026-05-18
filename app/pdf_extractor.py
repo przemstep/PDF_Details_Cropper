@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Callable
@@ -10,6 +11,8 @@ import fitz
 import pandas as pd
 
 from .models import CropRecord
+from .ocr_runtime import OCRRuntime
+from .settings import AppSettings
 from .utils import save_json, safe_filename
 
 LOGGER = logging.getLogger(__name__)
@@ -20,8 +23,6 @@ COLOR_RULES: dict[str, tuple[int, int, int]] = {
     "ignore": (255, 255, 0),
 }
 
-OCR_ENABLED = True
-OCR_LANGUAGE = "eng+pol"
 OCR_MIN_TEXT_LENGTH = 10
 OCR_DPI = 300
 CROP_PADDING_PT = 10
@@ -42,8 +43,12 @@ def crop_record_to_dict(record: object) -> dict:
 
 
 class PDFExtractor:
-    def __init__(self, intermediate_dir: Path, color_tolerance: int = 3, author_filter: str | None = None, crop_padding_pt: float = CROP_PADDING_PT, debug_overlay: bool = False) -> None:
+    def __init__(self, intermediate_dir: Path, root_dir: Path, settings: AppSettings, color_tolerance: int = 3, author_filter: str | None = None, crop_padding_pt: float = CROP_PADDING_PT, debug_overlay: bool = False) -> None:
         self.intermediate_dir = intermediate_dir
+        self.root_dir = root_dir
+        self.settings = settings
+        self.ocr_runtime = OCRRuntime(root_dir, settings)
+        self.ocr_status = self.ocr_runtime.initialize()
         self.color_tolerance = color_tolerance
         self.author_filter = author_filter
         self.crop_padding_pt = crop_padding_pt
@@ -116,30 +121,49 @@ class PDFExtractor:
             from PIL import Image
         except Exception as exc:  # noqa: BLE001
             raise OCRUnavailableError(str(exc)) from exc
-        return pytesseract.image_to_string(Image.open(png_path), lang=OCR_LANGUAGE)
+        return pytesseract.image_to_string(Image.open(png_path), lang=self.settings.ocr_languages or "eng+pol")
+
+
+    def _prepare_image_for_ocr(self, png_path: Path) -> Path:
+        from PIL import Image, ImageFilter, ImageOps
+
+        work_path = png_path.with_name(f"{png_path.stem}_ocrprep.png")
+        img = Image.open(png_path).convert("L")
+        img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
+        img = ImageOps.autocontrast(img)
+        img = img.filter(ImageFilter.MedianFilter(size=3))
+        img = img.point(lambda p: 255 if p > 140 else 0)
+        img.save(work_path)
+        return work_path
 
     def _extract_text_hybrid(self, page: fitz.Page, clip: fitz.Rect, png_path: Path) -> tuple[str, dict, bool]:
         pymupdf_text = (page.get_text("text", clip=clip) or "").strip()
         ocr_text = ""
         errors: list[str] = []
-        text_source = "pymupdf"
+        text_source = "native_pdf_text"
         used_ocr = False
-        if OCR_ENABLED and len(pymupdf_text) < OCR_MIN_TEXT_LENGTH:
+        if len(pymupdf_text.strip()) < OCR_MIN_TEXT_LENGTH and self.ocr_status.state == "available":
             try:
-                ocr_text = (self._run_ocr(png_path) or "").strip()
+                prep_path = self._prepare_image_for_ocr(png_path)
+                start = time.perf_counter()
+                ocr_text = (self._run_ocr(prep_path) or "").strip()
+                elapsed = time.perf_counter() - start
+                LOGGER.info("ocr.attempt crop_path=%s prep_path=%s time_s=%.3f chars=%s languages=%s", png_path, prep_path, elapsed, len(ocr_text), self.settings.ocr_languages)
                 used_ocr = True
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"ocr_failed:{exc}")
         combined = pymupdf_text
         if ocr_text and pymupdf_text:
             combined = f"{pymupdf_text}\n\n{ocr_text}".strip()
-            text_source = "pymupdf+ocr"
+            text_source = "native_pdf_text+ocr_text"
         elif ocr_text:
             combined = ocr_text
-            text_source = "ocr"
+            text_source = "ocr_text"
         elif not pymupdf_text:
             text_source = "empty"
-        meta = {"text_source": text_source, "pymupdf_text_length": len(pymupdf_text), "ocr_text_length": len(ocr_text), "ocr_engine": "pytesseract", "errors": errors}
+            if self.ocr_status.state != "available":
+                errors.append(f"ocr_unavailable:{self.ocr_status.message}")
+        meta = {"text_source": text_source, "pymupdf_text_length": len(pymupdf_text), "ocr_text_length": len(ocr_text), "ocr_engine": "pytesseract", "ocr_status": self.ocr_status.state, "errors": errors}
         return combined, meta, used_ocr
 
     def _write_debug_overlay(self, page: fitz.Page, out_path: Path, annot_rect: fitz.Rect | None, annot_bound: fitz.Rect | None, final_clip: fitz.Rect) -> None:
@@ -162,6 +186,7 @@ class PDFExtractor:
             if status_callback:
                 status_callback("extract", level, message)
         records: list[CropRecord] = []
+        LOGGER.info("ocr.runtime status=%s message=%s tesseract=%s tessdata=%s languages=%s", self.ocr_status.state, self.ocr_status.message, self.ocr_status.tesseract_path, self.ocr_status.tessdata_path, self.ocr_status.languages)
         report_rows: list[dict] = []
         with fitz.open(source_pdf) as doc:
             for page_index in range(len(doc)):

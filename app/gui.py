@@ -8,7 +8,9 @@ from pathlib import Path
 
 from .classifier import DetailClassifier
 from .exporter import Exporter
+from .ocr_runtime import OCRRuntime
 from .pdf_extractor import PDFExtractor
+from .settings import AppSettings, load_settings, save_settings
 from .synonym_builder import SynonymBuilder
 from .utils import ensure_log_dir
 
@@ -20,12 +22,16 @@ class AppGUI(tk.Tk):
         self.geometry("1080x720")
         self.root_dir = root_dir
         self.source_pdf: Path | None = None
+        self.settings = load_settings(root_dir)
         self.extract_output_dir: Path = self.root_dir / "intermediate"
         self.is_extracting = False
 
         self.pdf_path_var = tk.StringVar()
         self.output_dir_var = tk.StringVar(value=str(self.extract_output_dir))
         self.crop_padding_var = tk.StringVar(value="10")
+        self.tesseract_path_var = tk.StringVar(value=self.settings.tesseract_exe_path)
+        self.ocr_lang_var = tk.StringVar(value=self.settings.ocr_languages)
+        self.ocr_status_var = tk.StringVar(value="OCR status: unknown")
         self.status_vars = {}
         self.page_status_vars = {}
         self.bbox_status_vars = {}
@@ -70,6 +76,22 @@ class AppGUI(tk.Tk):
 
         ttk.Label(frame, text="Crop padding [pt]").pack(anchor="w")
         ttk.Entry(frame, textvariable=self.crop_padding_var).pack(anchor="w", pady=(2, 10))
+
+
+        ocr_box = ttk.LabelFrame(frame, text="OCR / Tesseract", padding=8)
+        ocr_box.pack(fill="x", pady=(0, 10))
+        ttk.Label(ocr_box, text="Ścieżka tesseract.exe").pack(anchor="w")
+        ocr_row = ttk.Frame(ocr_box)
+        ocr_row.pack(fill="x", pady=(2, 6))
+        ttk.Entry(ocr_row, textvariable=self.tesseract_path_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(ocr_row, text="Wskaż Tesseract", command=self._select_tesseract).pack(side="left", padx=(8, 0))
+        ttk.Button(ocr_row, text="Test OCR", command=self._test_ocr).pack(side="left", padx=(8, 0))
+        lang_row = ttk.Frame(ocr_box)
+        lang_row.pack(fill="x", pady=(2, 6))
+        ttk.Label(lang_row, text="Języki OCR:").pack(side="left")
+        ttk.Entry(lang_row, textvariable=self.ocr_lang_var, width=20).pack(side="left", padx=(8, 0))
+        ttk.Button(lang_row, text="Zapisz OCR", command=self._save_ocr_settings).pack(side="left", padx=(8, 0))
+        ttk.Label(ocr_box, textvariable=self.ocr_status_var).pack(anchor="w")
 
         self.extract_button = ttk.Button(frame, text="Start Extract", command=self._run_extract)
         self.extract_button.pack(anchor="w", pady=(0, 10))
@@ -223,7 +245,8 @@ class AppGUI(tk.Tk):
                 root_logger = logging.getLogger()
                 root_logger.addHandler(fh)
 
-                extractor = PDFExtractor(self.extract_output_dir, crop_padding_pt=float(self.crop_padding_var.get() or 10))
+                self._save_ocr_settings()
+                extractor = PDFExtractor(self.extract_output_dir, self.root_dir, self.settings, crop_padding_pt=float(self.crop_padding_var.get() or 10))
                 records = extractor.extract(
                     self.source_pdf,
                     self.source_pdf.stem,
@@ -242,6 +265,26 @@ class AppGUI(tk.Tk):
                 self.after(0, lambda: self._set_extract_running(False))
 
         threading.Thread(target=worker, daemon=True).start()
+
+
+    def _select_tesseract(self) -> None:
+        p = filedialog.askopenfilename(filetypes=[("Tesseract", "tesseract.exe"), ("Executable", "*.exe")])
+        if p:
+            self.tesseract_path_var.set(p)
+            self._save_ocr_settings()
+
+    def _save_ocr_settings(self) -> None:
+        self.settings.tesseract_exe_path = self.tesseract_path_var.get().strip()
+        self.settings.ocr_languages = self.ocr_lang_var.get().strip() or "eng+pol"
+        save_settings(self.root_dir, self.settings)
+        self.update_status_panel("extract", "INFO", "Zapisano ustawienia OCR")
+
+    def _test_ocr(self) -> None:
+        self._save_ocr_settings()
+        runtime = OCRRuntime(self.root_dir, self.settings)
+        status = runtime.initialize()
+        self.ocr_status_var.set(f"OCR status: {status.message}")
+        self.update_status_panel("extract", "INFO", f"OCR test: {status.state} path={status.tesseract_path} langs={status.languages}")
 
     def _gen_dict(self) -> None:
         dict_dir = self.extract_output_dir / "dictionaries"
