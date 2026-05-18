@@ -19,3 +19,5 @@ python main.py
 ## Build .exe (manual)
 Repo zawiera GitHub Action `Build Windows EXE` uruchamianą ręcznie przez **workflow_dispatch**.
 Po uruchomieniu pobierz artifact `PDF_Details_Cropper-exe`.
+
+Przed buildem upewnij się, że zależności zawierają `pytesseract` i `Pillow` (np. przez `pip install -r requirements.txt`).

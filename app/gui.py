@@ -282,9 +282,15 @@ class AppGUI(tk.Tk):
     def _test_ocr(self) -> None:
         self._save_ocr_settings()
         runtime = OCRRuntime(self.root_dir, self.settings)
-        status = runtime.initialize()
+        status = runtime.diagnostic_test()
         self.ocr_status_var.set(f"OCR status: {status.message}")
-        self.update_status_panel("extract", "INFO", f"OCR test: {status.state} path={status.tesseract_path} langs={status.languages}")
+        diagnostics = status.diagnostics or {}
+        diag_txt = (
+            f"tesseract_exe={diagnostics.get('tesseract_exe', 'n/a')} "
+            f"tessdata={diagnostics.get('tessdata', 'n/a')} "
+            f"pytesseract_import={diagnostics.get('pytesseract_import', 'n/a')}"
+        )
+        self.update_status_panel("extract", "INFO", f"OCR test: {status.state} path={status.tesseract_path} langs={status.languages} {diag_txt}")
 
     def _gen_dict(self) -> None:
         dict_dir = self.extract_output_dir / "dictionaries"
