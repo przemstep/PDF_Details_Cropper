@@ -11,7 +11,7 @@ import fitz
 import pandas as pd
 
 from .models import CropRecord
-from .ocr_runtime import OCRRuntime
+from .ocr_runtime import OCRRuntime, run_tesseract_ocr
 from .settings import AppSettings
 from .utils import save_json, safe_filename
 
@@ -116,12 +116,15 @@ class PDFExtractor:
         return dirs
 
     def _run_ocr(self, png_path: Path) -> str:
-        try:
-            import pytesseract
-            from PIL import Image
-        except Exception as exc:  # noqa: BLE001
-            raise OCRUnavailableError(str(exc)) from exc
-        return pytesseract.image_to_string(Image.open(png_path), lang=self.settings.ocr_languages or "eng+pol")
+        text, error = run_tesseract_ocr(
+            image_path=png_path,
+            tesseract_exe=Path(self.ocr_status.tesseract_path),
+            lang=self.settings.ocr_languages or "eng+pol",
+            tessdata_path=Path(self.ocr_status.tessdata_path) if self.ocr_status.tessdata_path else None,
+        )
+        if error:
+            raise OCRUnavailableError(error)
+        return text
 
 
     def _prepare_image_for_ocr(self, png_path: Path) -> Path:
@@ -163,7 +166,7 @@ class PDFExtractor:
             text_source = "empty"
             if self.ocr_status.state != "available":
                 errors.append(f"ocr_unavailable:{self.ocr_status.message}")
-        meta = {"text_source": text_source, "pymupdf_text_length": len(pymupdf_text), "ocr_text_length": len(ocr_text), "ocr_engine": "pytesseract", "ocr_status": self.ocr_status.state, "errors": errors}
+        meta = {"text_source": text_source, "pymupdf_text_length": len(pymupdf_text), "ocr_text_length": len(ocr_text), "ocr_engine": "tesseract_subprocess", "ocr_status": self.ocr_status.state, "errors": errors}
         return combined, meta, used_ocr
 
     def _write_debug_overlay(self, page: fitz.Page, out_path: Path, annot_rect: fitz.Rect | None, annot_bound: fitz.Rect | None, final_clip: fitz.Rect) -> None:

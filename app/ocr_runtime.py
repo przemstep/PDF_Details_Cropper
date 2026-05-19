@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from .settings import AppSettings, resolve_tesseract_path
 
 LOGGER = logging.getLogger(__name__)
+OCR_TIMEOUT_SECONDS = 30
 
 
 @dataclass(slots=True)
@@ -29,24 +31,12 @@ class OCRRuntime:
         langs = self.settings.ocr_languages or "eng+pol"
         path, source = resolve_tesseract_path(self.root_dir, self.settings)
         LOGGER.info("ocr.detected_tesseract_path path=%s source=%s", path, source)
-        if not path.exists():
-            return OCRRuntimeStatus("missing", "OCR missing", str(path), "", langs)
-        if not path.is_file():
-            return OCRRuntimeStatus("invalid", "Invalid Tesseract path", str(path), "", langs)
-        try:
-            import pytesseract
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.error("ocr.pytesseract_import_error error=%s", exc)
-            LOGGER.error("Install dependency: pip install pytesseract Pillow")
-            return OCRRuntimeStatus("missing_python_dependency", "OCR Python dependency missing: pytesseract", str(path), "", langs)
+        if not path.exists() or not path.is_file():
+            return OCRRuntimeStatus("missing_tesseract", "missing tesseract.exe", str(path), "", langs)
 
-        pytesseract.pytesseract.tesseract_cmd = str(path)
         tessdata_path = path.parent / "tessdata"
-        os.environ["TESSDATA_PREFIX"] = str(tessdata_path)
-        LOGGER.info("ocr.detected_tessdata path=%s", tessdata_path)
-
         if not tessdata_path.exists():
-            return OCRRuntimeStatus("missing_tessdata", "Missing tessdata", str(path), str(tessdata_path), langs)
+            return OCRRuntimeStatus("missing_tessdata", "missing tessdata", str(path), str(tessdata_path), langs)
 
         missing_langs = []
         for lang in [x.strip() for x in langs.split("+") if x.strip()]:
@@ -55,58 +45,37 @@ class OCRRuntime:
                 missing_langs.append(lang)
 
         if missing_langs:
-            return OCRRuntimeStatus(
-                "missing_lang",
-                f"Missing language data: {'/'.join(missing_langs)}",
-                str(path),
-                str(tessdata_path),
-                langs,
-            )
+            return OCRRuntimeStatus("missing_tessdata", f"missing language data: {'/'.join(missing_langs)}", str(path), str(tessdata_path), langs)
 
-        return OCRRuntimeStatus("available", "OCR initialized", str(path), str(tessdata_path), langs)
+        return OCRRuntimeStatus("available", "OCR ready", str(path), str(tessdata_path), langs)
 
     def diagnostic_test(self) -> OCRRuntimeStatus:
-        langs = self.settings.ocr_languages or "eng+pol"
-        path, source = resolve_tesseract_path(self.root_dir, self.settings)
-        LOGGER.info("ocr.detected_tesseract_path path=%s source=%s", path, source)
+        status = self.initialize()
+        diagnostics = {
+            "tesseract_exe": "ok" if status.state != "missing_tesseract" else "missing",
+            "tessdata": "ok" if status.state == "available" else "missing",
+        }
+        return OCRRuntimeStatus(status.state, status.message, status.tesseract_path, status.tessdata_path, status.languages, diagnostics)
 
-        diagnostics: dict[str, str] = {}
 
-        if path.exists() and path.is_file():
-            diagnostics["tesseract_exe"] = "ok"
-        else:
-            diagnostics["tesseract_exe"] = "missing"
+def run_tesseract_ocr(image_path: Path, tesseract_exe: Path, lang: str = "eng+pol", timeout_seconds: int = OCR_TIMEOUT_SECONDS, tessdata_path: Path | None = None) -> tuple[str, str | None]:
+    if not tesseract_exe.exists():
+        return "", f"missing executable: {tesseract_exe}"
 
-        tessdata_path = path.parent / "tessdata"
-        lang_checks: list[str] = []
-        for lang in [x.strip() for x in langs.split("+") if x.strip()]:
-            trained = tessdata_path / f"{lang}.traineddata"
-            if trained.exists():
-                lang_checks.append(f"{lang}:ok")
-            else:
-                lang_checks.append(f"{lang}:missing")
-        diagnostics["tessdata"] = ", ".join(lang_checks)
+    env = os.environ.copy()
+    if tessdata_path is not None and tessdata_path.exists():
+        env["TESSDATA_PREFIX"] = str(tessdata_path)
 
-        try:
-            import pytesseract  # noqa: F401
+    cmd = [str(tesseract_exe), str(image_path), "stdout", "-l", lang]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, env=env, check=False)
+    except subprocess.TimeoutExpired:
+        return "", f"OCR execution failed: timeout after {timeout_seconds}s"
+    except Exception as exc:  # noqa: BLE001
+        return "", f"OCR execution failed: {exc}"
 
-            diagnostics["pytesseract_import"] = "ok"
-        except Exception as exc:  # noqa: BLE001
-            diagnostics["pytesseract_import"] = f"missing ({exc})"
-            LOGGER.error("ocr.pytesseract_import_error error=%s", exc)
-            LOGGER.error("Install dependency: pip install pytesseract Pillow")
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        return "", f"OCR execution failed: {stderr or f'code={result.returncode}'}"
 
-        if diagnostics["tesseract_exe"] != "ok":
-            state = "missing"
-            message = "OCR missing"
-        elif "missing" in diagnostics["tessdata"]:
-            state = "missing_lang"
-            message = "Missing language data"
-        elif diagnostics["pytesseract_import"] != "ok":
-            state = "missing_python_dependency"
-            message = "OCR Python dependency missing: pytesseract"
-        else:
-            state = "available"
-            message = "OCR initialized"
-
-        return OCRRuntimeStatus(state, message, str(path), str(tessdata_path), langs, diagnostics)
+    return (result.stdout or "").strip(), None

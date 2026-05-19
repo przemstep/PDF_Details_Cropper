@@ -287,8 +287,7 @@ class AppGUI(tk.Tk):
         diagnostics = status.diagnostics or {}
         diag_txt = (
             f"tesseract_exe={diagnostics.get('tesseract_exe', 'n/a')} "
-            f"tessdata={diagnostics.get('tessdata', 'n/a')} "
-            f"pytesseract_import={diagnostics.get('pytesseract_import', 'n/a')}"
+            f"tessdata={diagnostics.get('tessdata', 'n/a')}"
         )
         self.update_status_panel("extract", "INFO", f"OCR test: {status.state} path={status.tesseract_path} langs={status.languages} {diag_txt}")
 

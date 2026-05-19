@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-DEFAULT_TESSERACT_EXE = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 PORTABLE_TESSERACT_EXE = Path("tesseract") / "tesseract.exe"
 DEFAULT_OCR_LANGUAGES = "eng+pol"
 
@@ -41,11 +41,17 @@ def resolve_tesseract_path(root_dir: Path, settings: AppSettings) -> tuple[Path,
     configured = (settings.tesseract_exe_path or "").strip()
     if configured:
         return Path(configured), "settings"
+
     env_path = os.getenv("PDF_ANALYZER_TESSERACT_EXE", "").strip()
     if env_path:
         return Path(env_path), "env"
-    default_path = Path(DEFAULT_TESSERACT_EXE)
-    if default_path.exists():
-        return default_path, "default"
+
     portable_path = (root_dir / PORTABLE_TESSERACT_EXE).resolve()
-    return portable_path, "portable"
+    if portable_path.exists():
+        return portable_path, "portable"
+
+    system_path = shutil.which("tesseract")
+    if system_path:
+        return Path(system_path), "system_path"
+
+    return portable_path, "portable_default"
