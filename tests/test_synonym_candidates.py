@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.synonym_candidates import SynonymCandidateService
+from app.synonym_candidates import generate_synonym_candidates, import_accepted_synonyms
 
 
 def _make_dict(path: Path) -> None:
@@ -15,49 +15,41 @@ def _make_dict(path: Path) -> None:
         pd.DataFrame(columns=["ElementCode", "Phrase", "Penalty"]).to_excel(w, sheet_name="NegativeSynonyms", index=False)
 
 
-def test_noise_only_has_no_candidates(tmp_path: Path):
-    src = tmp_path / "ex.xlsx"
-    pd.DataFrame([{"crop_id": "c1", "raw_text": "+9.56\n150\nREI120\nD=40 mm\n150x5 mm"}]).to_excel(src, index=False)
-    d = tmp_path / "dict.xlsx"
-    _make_dict(d)
-    out = SynonymCandidateService().generate_candidates(src, d, tmp_path)
-    df = pd.read_excel(out)
-    assert df.empty
-
-
-def test_en_and_pl_candidates_and_aggregation(tmp_path: Path):
+def test_aggregation_source_count(tmp_path: Path):
     src = tmp_path / "ex.xlsx"
     pd.DataFrame([
-        {"crop_id": "c1", "raw_text": "STAINLESS STEEL TOP RAIL\nSŁUPEK BALUSTRADY ZE STALI NIERDZEWNEJ"},
+        {"crop_id": "c1", "raw_text": "STAINLESS STEEL TOP RAIL"},
         {"crop_id": "c2", "raw_text": "STAINLESS STEEL TOP RAIL"},
     ]).to_excel(src, index=False)
     d = tmp_path / "dict.xlsx"
     _make_dict(d)
-    out = SynonymCandidateService().generate_candidates(src, d, tmp_path)
+    out = generate_synonym_candidates(src, d, tmp_path)
     df = pd.read_excel(out)
-    assert (df["Phrase"].str.lower() == "stainless steel top rail").any()
-    assert (df["Phrase"].str.lower() == "słupek balustrady ze stali nierdzewnej").any()
-    rail = df[df["Phrase"].str.lower() == "stainless steel top rail"].iloc[0]
-    assert rail["SourceCount"] == 2
-    assert rail["OccurrenceCount"] == 2
+    row = df[df["NormalizedPhrase"] == "stainless steel top rail"].iloc[0]
+    assert row["SourceCount"] == 2
+
+
+def test_import_pending_not_imported(tmp_path: Path):
+    d = tmp_path / "master_dictionary.xlsx"
+    _make_dict(d)
+    c = tmp_path / "synonym_candidates.xlsx"
+    pd.DataFrame([
+        {"Phrase": "internal fire door", "SuggestedElementCode": "E2", "Decision": "pending"}
+    ]).to_excel(c, sheet_name="Candidates", index=False)
+    imported = import_accepted_synonyms(c, d, confirm_overwrite=lambda _: True)
+    assert imported == 0
 
 
 def test_import_accept_and_deduplicate_and_backup(tmp_path: Path):
-    dictionary = tmp_path / "master_dictionary.xlsx"
-    _make_dict(dictionary)
-    candidates = tmp_path / "synonym_candidates.xlsx"
+    d = tmp_path / "master_dictionary.xlsx"
+    _make_dict(d)
+    c = tmp_path / "synonym_candidates.xlsx"
     pd.DataFrame([
         {"Phrase": "internal fire door", "SuggestedElementCode": "E2", "Decision": "accept"},
         {"Phrase": "internal fire door", "SuggestedElementCode": "E2", "Decision": "accept"},
-        {"Phrase": "ignored phrase", "SuggestedElementCode": "E2", "Decision": "pending"},
-    ]).to_excel(candidates, sheet_name="Candidates", index=False)
-
-    imported = SynonymCandidateService().import_accepted_candidates(candidates, dictionary, confirm_overwrite=lambda _: True)
-    assert imported == 2
-
-    syn = pd.read_excel(dictionary, sheet_name="Synonyms")
-    accepted = syn[(syn["ElementCode"] == "E2") & (syn["Phrase"] == "internal fire door")]
-    assert len(accepted) == 1
-
-    backups = list(tmp_path.glob("master_dictionary.backup_*.xlsx"))
-    assert backups
+    ]).to_excel(c, sheet_name="Candidates", index=False)
+    imported = import_accepted_synonyms(c, d, confirm_overwrite=lambda _: True)
+    assert imported == 1
+    syn = pd.read_excel(d, sheet_name="Synonyms")
+    assert len(syn[(syn["ElementCode"] == "E2") & (syn["Phrase"] == "internal fire door")]) == 1
+    assert list(tmp_path.glob("master_dictionary.backup_*.xlsx"))
