@@ -32,6 +32,7 @@ class AppGUI(tk.Tk):
         self.tesseract_path_var = tk.StringVar(value=self.settings.tesseract_exe_path)
         self.ocr_lang_var = tk.StringVar(value=self.settings.ocr_languages)
         self.ocr_status_var = tk.StringVar(value="OCR status: unknown")
+        self.dictionary_path_var = tk.StringVar(value="")
         self.status_vars = {}
         self.page_status_vars = {}
         self.bbox_status_vars = {}
@@ -49,7 +50,7 @@ class AppGUI(tk.Tk):
         self.class_tab = ttk.Frame(nb)
         self.export_tab = ttk.Frame(nb)
         nb.add(self.extract_tab, text="Extract")
-        nb.add(self.dict_tab, text="Dictionary Builder")
+        nb.add(self.dict_tab, text="Analyze Text")
         nb.add(self.class_tab, text="Classification")
         nb.add(self.export_tab, text="Export")
 
@@ -114,7 +115,7 @@ class AppGUI(tk.Tk):
     def _build_dict_tab(self) -> None:
         self._create_tab_description(
             self.dict_tab,
-            "Dictionary Builder",
+            "Analyze Text",
             [
                 "Co robi: Buduje słownik i analizę częstotliwości z danych ekstrakcji.",
                 "Dane wejściowe: extraction_data.xlsx z folderu roboczego.",
@@ -123,8 +124,11 @@ class AppGUI(tk.Tk):
                 "Uwagi: Korzysta z folderu ustawionego w Extract.",
             ],
         )
-        ttk.Button(self.dict_tab, text="Generate dictionary template", command=self._gen_dict).pack(pady=8)
-        ttk.Button(self.dict_tab, text="Generate frequency analysis", command=self._freq).pack(pady=8)
+        dict_row = ttk.Frame(self.dict_tab)
+        dict_row.pack(fill="x", padx=8, pady=8)
+        ttk.Entry(dict_row, textvariable=self.dictionary_path_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(dict_row, text="Wybierz master_dictionary.xlsx", command=self._select_dictionary).pack(side="left", padx=(8, 0))
+        ttk.Button(self.dict_tab, text="Analyze text", command=self._freq).pack(pady=8)
         self._build_status_panel(self.dict_tab, "dictionary")
 
     def _build_class_tab(self) -> None:
@@ -297,19 +301,28 @@ class AppGUI(tk.Tk):
         SynonymBuilder(dict_dir / "master_dictionary.xlsx").ensure_dictionary_template()
         messagebox.showinfo("Done", "Dictionary template generated")
 
+    def _select_dictionary(self) -> None:
+        p = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx")])
+        if p:
+            self.dictionary_path_var.set(p)
+
     def _freq(self) -> None:
-        dict_dir = self.extract_output_dir / "dictionaries"
-        dict_dir.mkdir(parents=True, exist_ok=True)
-        sb = SynonymBuilder(dict_dir / "master_dictionary.xlsx")
-        freq = sb.analyze_extractions(self.extract_output_dir / "extraction_data.xlsx")
-        freq.to_excel(dict_dir / "frequency_candidates.xlsx", index=False)
-        messagebox.showinfo("Done", "Frequency analysis exported")
+        dict_path = Path(self.dictionary_path_var.get().strip())
+        if not dict_path.exists():
+            messagebox.showerror("Error", "Wskaż poprawny plik master_dictionary.xlsx")
+            return
+        sb = SynonymBuilder(dict_path)
+        sb.analyze_text(self.extract_output_dir / "extraction_data.xlsx")
+        messagebox.showinfo("Done", "Analyze Text completed")
 
     def _classify(self) -> None:
-        dict_dir = self.extract_output_dir / "dictionaries"
+        dict_path = Path(self.dictionary_path_var.get().strip())
+        if not dict_path.exists():
+            messagebox.showerror("Error", "Wskaż poprawny plik master_dictionary.xlsx")
+            return
         DetailClassifier().classify(
             self.extract_output_dir / "extraction_data.xlsx",
-            dict_dir / "master_dictionary.xlsx",
+            dict_path,
             self.extract_output_dir,
             status_callback=lambda tab, level, msg: self.update_status_panel(tab, level, msg),
         )
