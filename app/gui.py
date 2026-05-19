@@ -6,12 +6,15 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 
+import pandas as pd
+
 from .classifier import DetailClassifier
 from .exporter import Exporter
 from .ocr_runtime import OCRRuntime
 from .pdf_extractor import PDFExtractor
 from .settings import AppSettings, load_settings, save_settings
 from .synonym_builder import SynonymBuilder
+from .synonym_candidates import SynonymCandidateService
 from .utils import ensure_log_dir
 
 
@@ -129,6 +132,8 @@ class AppGUI(tk.Tk):
         ttk.Entry(dict_row, textvariable=self.dictionary_path_var).pack(side="left", fill="x", expand=True)
         ttk.Button(dict_row, text="Wybierz master_dictionary.xlsx", command=self._select_dictionary).pack(side="left", padx=(8, 0))
         ttk.Button(self.dict_tab, text="Analyze text", command=self._freq).pack(pady=8)
+        ttk.Button(self.dict_tab, text="Generate synonym candidates", command=self._generate_synonym_candidates).pack(pady=4)
+        ttk.Button(self.dict_tab, text="Import accepted synonyms", command=self._import_accepted_synonyms).pack(pady=4)
         self._build_status_panel(self.dict_tab, "dictionary")
 
     def _build_class_tab(self) -> None:
@@ -314,6 +319,48 @@ class AppGUI(tk.Tk):
         sb = SynonymBuilder(dict_path)
         sb.analyze_text(self.extract_output_dir / "extraction_data.xlsx")
         messagebox.showinfo("Done", "Analyze Text completed")
+
+
+    def _generate_synonym_candidates(self) -> None:
+        dict_path = Path(self.dictionary_path_var.get().strip())
+        if not dict_path.exists():
+            messagebox.showerror("Error", "Wskaż poprawny plik master_dictionary.xlsx")
+            return
+        analyzed_path = self.extract_output_dir / "extraction_data.xlsx"
+        if not analyzed_path.exists():
+            messagebox.showerror("Error", "Brak pliku extraction_data.xlsx")
+            return
+        out_path = SynonymCandidateService().generate_candidates(
+            analyzed_path,
+            dict_path,
+            self.extract_output_dir,
+            status_callback=lambda tab, level, msg: self.update_status_panel(tab, level, msg),
+        )
+        df = pd.read_excel(out_path, sheet_name="Candidates")
+        self.update_status_panel("classification", "INFO", f"Generated {len(df)} candidates: {out_path}")
+        messagebox.showinfo("Done", f"Generated {len(df)} candidates\n{out_path}")
+
+    def _import_accepted_synonyms(self) -> None:
+        dict_path = Path(self.dictionary_path_var.get().strip())
+        if not dict_path.exists():
+            messagebox.showerror("Error", "Wskaż poprawny plik master_dictionary.xlsx")
+            return
+
+        default_path = self.extract_output_dir / "synonym_candidates.xlsx"
+        candidates_path = default_path
+        if not default_path.exists():
+            selected = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx")])
+            if not selected:
+                return
+            candidates_path = Path(selected)
+
+        imported = SynonymCandidateService().import_accepted_candidates(
+            candidates_path,
+            dict_path,
+            confirm_overwrite=lambda msg: messagebox.askyesno("Confirm", msg),
+            status_callback=lambda tab, level, msg: self.update_status_panel(tab, level, msg),
+        )
+        messagebox.showinfo("Done", f"Imported accepted synonyms: {imported}")
 
     def _classify(self) -> None:
         dict_path = Path(self.dictionary_path_var.get().strip())

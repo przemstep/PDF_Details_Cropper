@@ -92,7 +92,7 @@ class DetailClassifier:
             raise RuntimeError(f"Nieczytelny master_dictionary: {exc}") from exc
 
         if synonyms.empty:
-            emit("WARN", "Synonyms jest pusty - buduję bazowe synonimy z arkusza Elements")
+            emit("WARN", "Synonyms empty: using fallback generated from Elements. For better classification generate synonym candidates from extracted text.")
             synonyms = self.build_synonyms_from_elements(elements)
 
         elem_code_col = self._find_col(elements, "ElementCode") or self._find_col(elements, "Code")
