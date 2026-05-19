@@ -1,0 +1,854 @@
+from pathlib import Path
+import re
+import pandas as pd
+from rapidfuzz import fuzz, process
+
+SLOWNIK_PATH = Path("SLOWNIK.XLSX")
+FRAZY_PATH = Path("FRAZY.TXT")
+
+ELEMENTS_SHEET = "Elements"
+CONTEXT_SHEET = "ContextKeywords"
+
+MIN_SCORE = 75
+CONTEXT_MIN_SCORE = 80
+MIN_WORD_LEN = 4
+DEBUG = False
+
+ELEMENT_META_COLUMNS = {
+    "ElementCode",
+    "Priority",
+    "ContextGroup",
+    "MaterialGroup",
+    "SideSignal",
+    "SideWeight",
+    "PositionSignal",
+    "PositionWeight",
+    "IsStrongAnchor",
+    "AnchorWeight",
+    "Notes",
+}
+
+CONTEXT_META_COLUMNS = {
+    "ContextSignal",
+    "SideSignal",
+    "SideWeight",
+    "PositionSignal",
+    "PositionWeight",
+    "Notes",
+}
+
+FINAL_CONTEXT_LIMITS = {
+    "ground surface": 1,
+    "floor": 1,
+    "opening": 1,
+    "facade": 1,
+    "partition": 1,
+    "parapet": 1,
+    "ceiling": 1,
+}
+
+PASS_BONUS = {
+    1: 0,
+    2: 10,
+    3: 15,
+}
+
+GENERIC_MATCH_PENALTY = 15
+ANCHOR_BONUS_FACTOR = 0.15
+CONTEXT_SCORE_FACTOR = 0.25
+
+MATERIAL_ALIASES = {
+    "rc": {"żelbetowa", "żelbetowy", "żelbetowe", "reinforced", "concrete", "rc"},
+    "steel": {"stalowa", "stalowy", "stalowe", "steel"},
+    "plasterboard": {"gipsowo", "kartonowa", "kartonowy", "plasterboard", "gypsum"},
+    "masonry": {"murowana", "murowany", "murowane", "masonry", "brick"},
+}
+
+
+def normalize(text: str) -> str:
+    text = "" if pd.isna(text) else str(text)
+    text = text.lower()
+    text = re.sub(r"[^a-ząćęłńóśźż0-9\s]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def to_float(value, default: float = 0.0) -> float:
+    try:
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def canonical_side(value: str) -> str:
+    value = normalize(value)
+
+    aliases = {
+        "external": "external",
+        "ext": "external",
+        "zewnetrzny": "external",
+        "zewnętrzny": "external",
+
+        "internal": "internal",
+        "int": "internal",
+        "wewnetrzny": "internal",
+        "wewnętrzny": "internal",
+
+        "both": "both",
+        "oba": "both",
+
+        "unknown": "unknown",
+        "any": "unknown",
+        "": "unknown",
+    }
+
+    return aliases.get(value, value)
+
+
+def canonical_position(value: str) -> str:
+    value = normalize(value)
+
+    aliases = {
+        "base": "base",
+        "bottom": "base",
+        "przyziemie": "base",
+        "dol": "base",
+        "dół": "base",
+
+        "middle": "middle",
+        "mid": "middle",
+        "srodek": "middle",
+        "środek": "middle",
+
+        "top": "top",
+        "gora": "top",
+        "góra": "top",
+
+        "any": "any",
+        "unknown": "any",
+        "": "any",
+    }
+
+    return aliases.get(value, value)
+
+
+def tokenize(text: str) -> list[str]:
+    return [
+        token for token in normalize(text).split()
+        if len(token) >= MIN_WORD_LEN
+    ]
+
+
+def entry_kind(value: str) -> str:
+    return "generic" if len(normalize(value).split()) == 1 else "specific"
+
+
+def is_material_token(token: str) -> bool:
+    token = normalize(token)
+    return any(token in aliases for aliases in MATERIAL_ALIASES.values())
+
+
+def detect_material_group_from_text(text: str) -> set[str]:
+    words = set(normalize(text).split())
+    found = set()
+
+    for material, aliases in MATERIAL_ALIASES.items():
+        if words & aliases:
+            found.add(material)
+
+    return found
+
+
+def is_numeric_line(text: str) -> bool:
+    tokens = normalize(text).split()
+    if not tokens:
+        return False
+
+    numeric_count = 0
+
+    for token in tokens:
+        if re.fullmatch(r"\d+([.,]\d+)?", token):
+            numeric_count += 1
+
+    return numeric_count / len(tokens) > 0.7
+
+
+def is_elevation_line(text: str) -> bool:
+    text = normalize(text)
+    return bool(re.fullmatch(r"[+-]?\d+([.,]\d+)?", text))
+
+
+def parse_lines(text: str) -> list[dict]:
+    lines = []
+
+    for i, raw in enumerate(text.splitlines()):
+        norm = normalize(raw)
+
+        if not norm:
+            continue
+
+        if is_elevation_line(norm):
+            kind = "elevation"
+        elif is_numeric_line(norm):
+            kind = "number"
+        else:
+            kind = "text"
+
+        lines.append({
+            "line_index": i,
+            "raw": raw.strip(),
+            "normalized": norm,
+            "tokens": tokenize(norm),
+            "kind": kind,
+        })
+
+    return lines
+
+
+def build_line_segments(lines: list[dict], max_window_size: int = 3) -> list[dict]:
+    text_lines = [line for line in lines if line["kind"] == "text"]
+    segments = []
+
+    for size in range(1, max_window_size + 1):
+        for start in range(0, len(text_lines) - size + 1):
+            selected = text_lines[start:start + size]
+
+            segments.append({
+                "segment_type": f"{size}_line",
+                "start_line": selected[0]["line_index"],
+                "end_line": selected[-1]["line_index"],
+                "text": " ".join(x["normalized"] for x in selected),
+                "raw": " / ".join(x["raw"] for x in selected),
+            })
+
+    return segments
+
+
+def load_elements(path: Path) -> list[dict]:
+    df = pd.read_excel(path, sheet_name=ELEMENTS_SHEET)
+
+    dictionary = []
+
+    for _, row in df.iterrows():
+        code = row.get("ElementCode")
+        priority = to_float(row.get("Priority"))
+
+        context_group = normalize(row.get("ContextGroup"))
+        material_group = normalize(row.get("MaterialGroup"))
+        side_signal = canonical_side(row.get("SideSignal"))
+        side_weight = to_float(row.get("SideWeight"))
+        position_signal = canonical_position(row.get("PositionSignal"))
+        position_weight = to_float(row.get("PositionWeight"))
+        is_strong_anchor = normalize(row.get("IsStrongAnchor")) in {"yes", "true", "1", "tak"}
+        anchor_weight = to_float(row.get("AnchorWeight"))
+
+        for col in df.columns:
+            if col in ELEMENT_META_COLUMNS:
+                continue
+
+            value_norm = normalize(row.get(col))
+            if not value_norm:
+                continue
+
+            dictionary.append({
+                "value": value_norm,
+                "code": code,
+                "priority": priority,
+                "source_column": col,
+                "kind": entry_kind(value_norm),
+                "context_group": context_group,
+                "material_group": material_group,
+                "side_signal": side_signal,
+                "side_weight": side_weight,
+                "position_signal": position_signal,
+                "position_weight": position_weight,
+                "is_strong_anchor": is_strong_anchor,
+                "anchor_weight": anchor_weight,
+            })
+
+    return dictionary
+
+
+def load_context_keywords(path: Path) -> list[dict]:
+    df = pd.read_excel(path, sheet_name=CONTEXT_SHEET)
+
+    keywords = []
+
+    for _, row in df.iterrows():
+        context_signal = normalize(row.get("ContextSignal"))
+        side_signal = canonical_side(row.get("SideSignal"))
+        side_weight = to_float(row.get("SideWeight"))
+        position_signal = canonical_position(row.get("PositionSignal"))
+        position_weight = to_float(row.get("PositionWeight"))
+        notes = row.get("Notes")
+
+        for col in df.columns:
+            if col in CONTEXT_META_COLUMNS:
+                continue
+
+            value_norm = normalize(row.get(col))
+            if not value_norm:
+                continue
+
+            keywords.append({
+                "value": value_norm,
+                "source_column": col,
+                "context_signal": context_signal,
+                "side_signal": side_signal,
+                "side_weight": side_weight,
+                "position_signal": position_signal,
+                "position_weight": position_weight,
+                "notes": notes,
+            })
+
+    return keywords
+
+
+def has_material_conflict(query: str, item: dict) -> bool:
+    q_materials = detect_material_group_from_text(query)
+    item_material = normalize(item.get("material_group"))
+
+    if not q_materials:
+        return False
+
+    if not item_material or item_material in {"none", "mixed", "unknown"}:
+        return False
+
+    return item_material not in q_materials
+
+
+def is_valid_match(query: str, item: dict) -> bool:
+    q_words = normalize(query).split()
+    m_words = normalize(item["value"]).split()
+
+    if has_material_conflict(query, item):
+        return False
+
+    if len(q_words) > 1 and len(m_words) == 1:
+        return m_words[0] in q_words
+
+    return True
+
+
+def calculate_final_score(row: dict) -> float:
+    final = float(row["score"])
+    final += PASS_BONUS.get(row["pass"], 0)
+
+    if row["kind"] == "generic" and row["pass"] > 1:
+        final -= GENERIC_MATCH_PENALTY
+
+    if row["is_strong_anchor"]:
+        final += row["anchor_weight"] * ANCHOR_BONUS_FACTOR
+
+    return round(final, 1)
+
+
+def best_element_matches(
+    query: str,
+    elements: list[dict],
+    pass_no: int,
+    token_index: int,
+    limit: int = 50,
+) -> list[dict]:
+    choices = [item["value"] for item in elements]
+
+    results = process.extract(
+        normalize(query),
+        choices,
+        scorer=fuzz.WRatio,
+        limit=limit,
+    )
+
+    hits = []
+
+    if DEBUG:
+        print(f"\nDEBUG ELEMENT PASS {pass_no} | idx={token_index} | query='{query}'")
+        print("-" * 90)
+
+    for match, score, index in results:
+        item = elements[index]
+        score = round(score, 1)
+
+        if score < MIN_SCORE:
+            continue
+
+        valid = is_valid_match(query, item)
+
+        if DEBUG:
+            print(
+                f"{'OK' if valid else 'DROP':4} | "
+                f"score={score:5} | "
+                f"code={item['code']} | "
+                f"context={item['context_group']} | "
+                f"side={item['side_signal']}:{item['side_weight']} | "
+                f"pos={item['position_signal']}:{item['position_weight']} | "
+                f"match='{item['value']}'"
+            )
+
+        if not valid:
+            continue
+
+        hit = {
+            "pass": pass_no,
+            "token_index": token_index,
+            "query": query,
+            "match": item["value"],
+            "score": score,
+            **item,
+        }
+
+        hit["final_score"] = calculate_final_score(hit)
+        hits.append(hit)
+
+    return hits
+
+
+def phrase_window(tokens: list[str], index: int, radius: int) -> str:
+    start = max(0, index - radius)
+    end = min(len(tokens), index + radius + 1)
+    return " ".join(tokens[start:end])
+
+
+def deduplicate_elements(results: list[dict]) -> list[dict]:
+    unique = {}
+
+    for row in results:
+        key = row["code"]
+
+        if key not in unique:
+            unique[key] = row
+            continue
+
+        old = unique[key]
+
+        if (
+            row["final_score"] > old["final_score"]
+            or (
+                row["final_score"] == old["final_score"]
+                and row["score"] > old["score"]
+            )
+            or (
+                row["final_score"] == old["final_score"]
+                and row["score"] == old["score"]
+                and row["token_index"] < old["token_index"]
+            )
+        ):
+            unique[key] = row
+
+    return list(unique.values())
+
+
+def match_context_keywords(
+    lines: list[dict],
+    context_keywords: list[dict],
+    limit: int = 20,
+) -> list[dict]:
+
+    text_lines = [line for line in lines if line["kind"] == "text"]
+    choices = [item["value"] for item in context_keywords]
+
+    hits = []
+
+    for line in text_lines:
+        query = line["normalized"]
+
+        results = process.extract(
+            query,
+            choices,
+            scorer=fuzz.WRatio,
+            limit=limit,
+        )
+
+        for match, score, index in results:
+            score = round(score, 1)
+
+            if score < CONTEXT_MIN_SCORE:
+                continue
+
+            item = context_keywords[index]
+
+            hits.append({
+                "line_index": line["line_index"],
+                "query": query,
+                "raw": line["raw"],
+                "match": item["value"],
+                "score": score,
+                **item,
+            })
+
+    return deduplicate_context_hits(hits)
+
+
+def deduplicate_context_hits(hits: list[dict]) -> list[dict]:
+    unique = {}
+
+    for row in hits:
+        key = (
+            row["line_index"],
+            row["context_signal"],
+            row["match"],
+        )
+
+        if key not in unique or row["score"] > unique[key]["score"]:
+            unique[key] = row
+
+    return list(unique.values())
+
+
+def infer_detail_context(
+    element_results: list[dict],
+    context_hits: list[dict],
+) -> dict:
+    side_scores = {"external": 0.0, "internal": 0.0}
+    position_scores = {"base": 0.0, "middle": 0.0, "top": 0.0}
+    context_groups = {}
+
+    def add_signal(side, side_weight, position, position_weight, score):
+        factor = score / 100.0
+
+        if side == "external":
+            side_scores["external"] += side_weight * factor
+        elif side == "internal":
+            side_scores["internal"] += side_weight * factor
+        elif side == "both":
+            side_scores["external"] += side_weight * 0.5 * factor
+            side_scores["internal"] += side_weight * 0.5 * factor
+
+        if position in position_scores:
+            position_scores[position] += position_weight * factor
+
+    for row in element_results:
+        add_signal(
+            row.get("side_signal"),
+            to_float(row.get("side_weight")),
+            row.get("position_signal"),
+            to_float(row.get("position_weight")),
+            row.get("final_score", row.get("score", 0)),
+        )
+
+        group = row.get("context_group")
+        if group:
+            context_groups[group] = context_groups.get(group, 0.0) + row["final_score"]
+
+    for row in context_hits:
+        add_signal(
+            row.get("side_signal"),
+            to_float(row.get("side_weight")),
+            row.get("position_signal"),
+            to_float(row.get("position_weight")),
+            row.get("score", 0),
+        )
+
+        signal = row.get("context_signal")
+        if signal:
+            context_groups[signal] = context_groups.get(signal, 0.0) + row["score"]
+
+    side = max(side_scores, key=side_scores.get)
+    position = max(position_scores, key=position_scores.get)
+
+    side_confidence = abs(side_scores["external"] - side_scores["internal"])
+
+    if side_scores[side] < 30 or side_confidence < 20:
+        side = "unresolved"
+
+    if position_scores[position] < 30:
+        position = "unresolved"
+
+    return {
+        "side": side,
+        "position": position,
+        "side_scores": side_scores,
+        "position_scores": position_scores,
+        "context_groups": dict(
+            sorted(context_groups.items(), key=lambda x: x[1], reverse=True)
+        ),
+    }
+
+
+def apply_context_boost(results: list[dict], detail_context: dict) -> list[dict]:
+    side = detail_context["side"]
+    position = detail_context["position"]
+
+    adjusted = []
+
+    for row in results:
+        row = row.copy()
+        boost = 0.0
+
+        if side != "unresolved":
+            if row["side_signal"] == side:
+                boost += row["side_weight"] * CONTEXT_SCORE_FACTOR
+            elif row["side_signal"] == "both":
+                boost += row["side_weight"] * CONTEXT_SCORE_FACTOR * 0.5
+
+        if position != "unresolved":
+            if row["position_signal"] == position:
+                boost += row["position_weight"] * CONTEXT_SCORE_FACTOR
+
+        row["context_boost"] = round(boost, 1)
+        row["final_score_context"] = round(row["final_score"] + boost, 1)
+
+        adjusted.append(row)
+
+    return adjusted
+
+
+def print_results(title: str, results: list[dict], score_key: str = "final_score"):
+    print(f"\n{title}")
+    print("-" * len(title))
+
+    for row in sorted(
+        results,
+        key=lambda x: (
+            -x.get(score_key, x["final_score"]),
+            -x["score"],
+            -x["priority"],
+        ),
+    ):
+        print(
+            f"{score_key}={row.get(score_key, row['final_score'])} | "
+            f"fit={row.get('detail_fit_score','-')} | "
+            f"raw={row['score']} | "
+            f"code={row['code']} | "
+            f"query='{row['query']}' | "
+            f"match='{row['match']}' | "
+            f"side={row['side_signal']} | "
+            f"pos={row['position_signal']} | "
+            f"context={row['context_group']}"
+        )
+
+
+def print_context_hits(context_hits: list[dict]):
+    print("\nCONTEXT KEYWORDS")
+    print("----------------")
+
+    for row in sorted(context_hits, key=lambda x: -x["score"]):
+        print(
+            f"line={row['line_index']} | "
+            f"score={row['score']} | "
+            f"context={row['context_signal']} | "
+            f"side={row['side_signal']}:{row['side_weight']} | "
+            f"pos={row['position_signal']}:{row['position_weight']} | "
+            f"match='{row['match']}' | "
+            f"raw='{row['raw']}'"
+        )
+
+
+def print_detail_context(detail_context: dict):
+    print("\nDETAIL CONTEXT")
+    print("--------------")
+    print(f"Side: {detail_context['side']}")
+    print(f"Position: {detail_context['position']}")
+    print(f"Side scores: {detail_context['side_scores']}")
+    print(f"Position scores: {detail_context['position_scores']}")
+    print(f"Context groups: {detail_context['context_groups']}")
+
+
+
+def detail_fit_score(row: dict, detail_context: dict) -> float:
+    score = row.get("final_score_context", row["final_score"])
+
+    # dopasowanie side
+    if detail_context["side"] != "unresolved":
+        if row["side_signal"] == detail_context["side"]:
+            score += 20
+        elif row["side_signal"] not in {"both", "unknown"}:
+            score -= 30
+
+    # dopasowanie position
+    if detail_context["position"] != "unresolved":
+        if row["position_signal"] == detail_context["position"]:
+            score += 20
+        elif row["position_signal"] not in {"any", "unknown"}:
+            score -= 15
+
+    return round(score, 1)
+
+
+def select_final_candidates(
+    results: list[dict],
+    detail_context: dict,
+) -> list[dict]:
+    """
+    Redukuje listę wyników:
+    - max 1 kandydat na ContextGroup
+    - odrzuca słabe wyniki
+    - uwzględnia zgodność z finalnym kontekstem detalu
+    """
+
+    filtered = []
+
+    for row in results:
+        score = row.get("final_score_context", row["final_score"])
+
+        # 1. odrzuć słabe
+        if score < 100:
+            continue
+
+        # 2. generic musi być mocny
+        if row.get("kind") == "generic" and row["score"] < 95:
+            continue
+
+        # 3. pojedyncze słowo typu wall jest za słabe
+        if row["pass"] == 1 and len(row["query"].split()) == 1:
+            if row["kind"] == "specific" and row["score"] < 95:
+                continue
+
+        row = row.copy()
+        row["detail_fit_score"] = detail_fit_score(row, detail_context)
+
+        filtered.append(row)
+
+    grouped = {}
+
+    for row in filtered:
+        group = row.get("context_group") or "unknown"
+
+        if group not in grouped:
+            grouped[group] = []
+
+        grouped[group].append(row)
+
+    selected = []
+
+    for group, rows in grouped.items():
+        limit = FINAL_CONTEXT_LIMITS.get(group, 1)
+
+        rows = sorted(
+            rows,
+            key=lambda x: (
+                x["detail_fit_score"],
+                x.get("kind") == "specific",
+                x.get("final_score_context", x["final_score"]),
+                x["score"],
+                x["priority"],
+            ),
+            reverse=True,
+        )
+
+        selected.extend(rows[:limit])
+
+    return sorted(
+        selected,
+        key=lambda x: x["detail_fit_score"],
+        reverse=True,
+    )
+
+def main():
+    elements = load_elements(SLOWNIK_PATH)
+    context_keywords = load_context_keywords(SLOWNIK_PATH)
+
+    text = FRAZY_PATH.read_text(encoding="utf-8")
+    lines = parse_lines(text)
+
+    text_lines = [line for line in lines if line["kind"] == "text"]
+
+    pass1 = []
+    pass2 = []
+    pass3 = []
+
+    for line in text_lines:
+        line_index = line["line_index"]
+        line_tokens = line["tokens"]
+
+        hit_token_indexes = []
+
+        # PASS 1: pojedyncze słowa tylko w obrębie jednej linii
+        for token_index, token in enumerate(line_tokens):
+            if is_material_token(token):
+                hit_token_indexes.append(token_index)
+                continue
+
+            hits = best_element_matches(
+                query=token,
+                elements=elements,
+                pass_no=1,
+                token_index=token_index,
+            )
+
+            if hits:
+                hit_token_indexes.append(token_index)
+
+            for hit in hits:
+                hit["line_index"] = line_index
+                hit["raw_line"] = line["raw"]
+
+            pass1.extend(hits)
+
+        hit_token_indexes = sorted(set(hit_token_indexes))
+
+        # PASS 2: +1/-1 tylko w tej samej linii
+        for token_index in hit_token_indexes:
+            phrase = phrase_window(line_tokens, token_index, radius=1)
+
+            hits = best_element_matches(
+                query=phrase,
+                elements=elements,
+                pass_no=2,
+                token_index=token_index,
+            )
+
+            for hit in hits:
+                hit["line_index"] = line_index
+                hit["raw_line"] = line["raw"]
+
+            pass2.extend(hits)
+
+        # PASS 3: +2/-2 tylko w tej samej linii
+        for token_index in hit_token_indexes:
+            phrase = phrase_window(line_tokens, token_index, radius=2)
+
+            hits = best_element_matches(
+                query=phrase,
+                elements=elements,
+                pass_no=3,
+                token_index=token_index,
+            )
+
+            for hit in hits:
+                hit["line_index"] = line_index
+                hit["raw_line"] = line["raw"]
+
+            pass3.extend(hits)
+
+    pass1 = deduplicate_elements(pass1)
+    pass2 = deduplicate_elements(pass2)
+    pass3 = deduplicate_elements(pass3)
+
+    all_element_results = deduplicate_elements(pass1 + pass2 + pass3)
+
+    context_hits = match_context_keywords(lines, context_keywords)
+
+    detail_context = infer_detail_context(
+        element_results=all_element_results,
+        context_hits=context_hits,
+    )
+
+    adjusted_results = apply_context_boost(all_element_results, detail_context)
+    adjusted_results = deduplicate_elements(adjusted_results)
+
+    final_candidates = select_final_candidates(adjusted_results, detail_context)
+
+    print_results("PASS 1 - pojedyncze słowa", pass1)
+    print_results("PASS 2 - frazy +1/-1 w obrębie jednej linii", pass2)
+    print_results("PASS 3 - frazy +2/-2 w obrębie jednej linii", pass3)
+
+    print_context_hits(context_hits)
+    print_detail_context(detail_context)
+
+    print_results(
+        "FINAL - po uwzględnieniu ContextKeywords",
+        adjusted_results,
+        score_key="final_score_context",
+    )
+
+    print_results(
+        "FINAL CANDIDATES - zredukowana lista",
+        final_candidates,
+        score_key="final_score_context",
+    )
+
+
+if __name__ == "__main__":
+    main()
