@@ -30,6 +30,39 @@ class SynonymBuilder:
         out = pd.DataFrame({"Phrase": list(freq.keys()), "Count": list(freq.values())}).sort_values("Count", ascending=False)
         return out
 
+    def analyze_text(self, extraction_xlsx: Path) -> pd.DataFrame:
+        if not self.dict_path.exists():
+            raise FileNotFoundError(f"Brak master_dictionary: {self.dict_path}")
+
+        frequency = self.analyze_extractions(extraction_xlsx)
+        with pd.ExcelFile(self.dict_path) as xls:
+            elements = pd.read_excel(xls, sheet_name="Elements")
+            synonyms = pd.read_excel(xls, sheet_name="Synonyms")
+            negative = pd.read_excel(xls, sheet_name="NegativeSynonyms") if "NegativeSynonyms" in xls.sheet_names else pd.DataFrame(columns=["ElementCode", "Phrase", "Penalty"])
+            stopwords = pd.read_excel(xls, sheet_name="StopWords") if "StopWords" in xls.sheet_names else pd.DataFrame(columns=["Phrase"])
+
+        from .classifier import DetailClassifier
+
+        classifier = DetailClassifier()
+        if synonyms.empty:
+            synonyms = classifier.build_synonyms_from_elements(elements)
+
+        classifier.classify(
+            analyzed_matches_path=extraction_xlsx,
+            dictionary_path=self.dict_path,
+            output_dir=extraction_xlsx.parent,
+            status_callback=None,
+        )
+
+        with pd.ExcelWriter(self.dict_path, engine="openpyxl") as writer:
+            elements.to_excel(writer, sheet_name="Elements", index=False)
+            synonyms.to_excel(writer, sheet_name="Synonyms", index=False)
+            negative.to_excel(writer, sheet_name="NegativeSynonyms", index=False)
+            stopwords.to_excel(writer, sheet_name="StopWords", index=False)
+            frequency.to_excel(writer, sheet_name="FrequencyAnalysis", index=False)
+
+        return frequency
+
     def ensure_dictionary_template(self) -> None:
         self.dict_path.parent.mkdir(parents=True, exist_ok=True)
         with pd.ExcelWriter(self.dict_path, engine="openpyxl") as writer:
